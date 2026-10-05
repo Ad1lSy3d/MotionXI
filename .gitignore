@@ -1,0 +1,56 @@
+# Python virtual environments & bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & linting caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build artifacts & packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Secrets & environment configurations
+.env
+.env.*
+*.secret
+!.env.example
+
+# Local models and weights (Option B: external acquisition, tracked in documentation)
+weights/*.pt
+weights/*.pth
+*.onnx
+!weights/.gitkeep
+
+# Generated output videos, data exports, and logs
+outputs/*
+!outputs/.gitkeep
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.log
+temp/
+tmp/
+
+# Local datasets and benchmark data
+data/soccernet_tracking/
+data/raw/
+*.zip
+*.tar.gz
+!data/homography_matrix.json
+!data/.gitkeep
