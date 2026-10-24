@@ -280,9 +280,10 @@ def draw_tracks(
     track_ms: float = 0.0,
     total_unique_ids: int = 0,
     device_name: str = "mps",
+    tracker_name: str = "ByteTrack",
 ) -> np.ndarray:
     """
-    Render high-contrast ByteTrack visualizations including ID tags, foot trails, and HUD telemetry.
+    Render tracker visualizations including ID tags, foot trails, and HUD telemetry.
     """
     canvas = frame.copy()
     h, w = canvas.shape[:2]
@@ -301,7 +302,7 @@ def draw_tracks(
     time_str = f"{minutes:02d}:{seconds:05.2f}"
 
     hud_text = (
-        f"COURTVISION AI | BYTETRACK | Frame: {frame_idx:03d}/{total_frames:03d} | "
+        f"COURTVISION AI | {tracker_name.upper()} | Frame: {frame_idx:03d}/{total_frames:03d} | "
         f"Time: {time_str} | "
         f"Active: {len(tracks)} | Total IDs: {total_unique_ids} | "
         f"Infer: {infer_ms:.1f}ms | Track: {track_ms:.1f}ms | "
@@ -335,6 +336,10 @@ def draw_tracks(
     for track in tracks:
         t_id = track.track_id
         color = get_track_color(t_id)
+        if track.state == "ghost":
+            color = (0, 190, 255)
+        elif track.state == "in_cluster":
+            color = (255, 180, 0)
 
         x1, y1 = int(round(track.x1)), int(round(track.y1))
         x2, y2 = int(round(track.x2)), int(round(track.y2))
@@ -344,7 +349,12 @@ def draw_tracks(
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
 
         # ID Badge
-        label = f"ID:{t_id} ({track.confidence:.2f})"
+        if track.state == "ghost":
+            label = f"ID:{t_id} GHOST"
+        elif track.state == "in_cluster":
+            label = f"ID:{t_id} CLUSTER"
+        else:
+            label = f"ID:{t_id} ({track.confidence:.2f})"
         (label_w, label_h), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
         )

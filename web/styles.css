@@ -124,6 +124,11 @@ h2 { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .mode-copy strong, .mode-copy small { display: block; }
 .mode-copy strong { font-size: 16px; font-weight: 600; }
 .mode-copy small { margin-top: 3px; color: var(--muted); font-size: 14px; line-height: 1.4; }
+.tracker-choice { max-width: 360px; margin-top: 14px; }
+.field-label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.tracker-choice select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink); font: inherit; }
+.field-help { margin-top: 5px; color: var(--muted); font-size: 12px; }
+.tracker-choice[hidden] { display: none; }
 
 /* Results */
 .page { max-width: 880px; padding: 56px; }

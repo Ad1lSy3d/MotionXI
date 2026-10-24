@@ -30,7 +30,7 @@ def test_dashboard_and_status_are_served(client):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Match video, made measurable." in response.text
+    assert "Choose a video" in response.text
     assert client.get("/assets/styles.css").status_code == 200
     assert client.get("/assets/app.js").status_code == 200
 
@@ -70,7 +70,10 @@ def test_start_job_requires_model_checkpoint(client):
         content=b"sample video bytes",
     ).json()
 
-    response = client.post("/api/jobs", json={"video_id": upload["id"], "mode": "tracking"})
+    response = client.post(
+        "/api/jobs",
+        json={"video_id": upload["id"], "mode": "tracking", "tracker": "kmt"},
+    )
 
     assert response.status_code == 503
     assert "weights/best.pt" in response.json()["detail"]
@@ -93,10 +96,12 @@ def test_start_job_runs_existing_script(client, monkeypatch, tmp_path):
     assert response.status_code == 202
     job = response.json()
     assert job["status"] == "running"
+    assert job["tracker"] == "kmt"
     command = popen.call_args.args[0]
     assert command[1].endswith("run_tracking.py")
     assert "--video" in command
     assert "--weights" in command
+    assert command[-2:] == ["--tracker", "kmt"]
 
 
 def test_upload_size_limit_cleans_up_partial_file(client, monkeypatch):

@@ -1,5 +1,3 @@
-"""Local web dashboard for the existing CourtVision video pipelines."""
-
 from __future__ import annotations
 
 import re
@@ -37,6 +35,7 @@ _jobs_lock = threading.Lock()
 class JobRequest(BaseModel):
     video_id: str
     mode: Literal["detection", "tracking"]
+    tracker: Literal["bytetrack", "kmt"] = "bytetrack"
 
 
 def _list_videos() -> list[Dict[str, str]]:
@@ -99,6 +98,7 @@ def _job_payload(job_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": job_id,
         "mode": job["mode"],
+        "tracker": job["tracker"],
         "video_name": job["video_name"],
         "status": status,
         "return_code": return_code,
@@ -203,6 +203,8 @@ def start_job(request: JobRequest) -> Dict[str, Any]:
     ]
     if HOMOGRAPHY_FILE.is_file():
         command.extend(["--homography", str(HOMOGRAPHY_FILE)])
+    if request.mode == "tracking":
+        command.extend(["--tracker", request.tracker])
 
     with _jobs_lock:
         for existing_id, existing_job in _jobs.items():
@@ -223,6 +225,7 @@ def start_job(request: JobRequest) -> Dict[str, Any]:
         _jobs[job_id] = {
             "process": process,
             "mode": request.mode,
+            "tracker": request.tracker if request.mode == "tracking" else None,
             "video_name": video_path.name,
             "output_dir": output_dir,
             "log_path": log_path,

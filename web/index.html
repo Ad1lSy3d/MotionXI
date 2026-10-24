@@ -98,6 +98,14 @@
                 <span class="mode-copy"><strong>Detection only</strong><small>Player bounding boxes in every frame</small></span>
               </label>
             </fieldset>
+            <div class="tracker-choice" id="tracker-choice">
+              <label class="field-label" for="tracker-select">Tracking method</label>
+              <select id="tracker-select">
+                <option value="bytetrack">ByteTrack — baseline</option>
+                <option value="kmt">KMT — kinematic memory</option>
+              </select>
+              <p class="field-help">KMT predicts short occlusions. Compare its results with the ByteTrack baseline.</p>
+            </div>
           </div>
         </div>
       </section>

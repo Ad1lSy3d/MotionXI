@@ -92,7 +92,7 @@ uv sync
 
 ## 6. Running Automated Tests
 
-Run the complete test suite (32 unit and regression tests) through UV:
+Run the complete automated test suite through UV:
 
 ```bash
 uv run pytest -v
@@ -110,7 +110,7 @@ The test suite covers:
 
 ## Local Web Dashboard
 
-The project includes a small local dashboard for running the existing detection and ByteTrack pipelines. It does not add a separate web UI framework or change the underlying pipelines.
+The project includes a small local dashboard for running the existing detection, ByteTrack, and KMT pipelines. It does not change the underlying pipelines.
 
 1. Install the project environment with `uv sync`.
 2. Place the team-provided model checkpoint at `weights/best.pt`.
@@ -121,7 +121,7 @@ The project includes a small local dashboard for running the existing detection 
    ```
 
 4. Open `http://127.0.0.1:8000` in your browser.
-5. Upload a match video in the dashboard or place it directly in `data/`, then select **Player tracking** or **Player detection only** and run the pipeline.
+5. Upload a match video in the dashboard or place it directly in `data/`, select **Player tracking** or **Player detection only**, and choose ByteTrack or KMT for tracking.
 
 The dashboard serves only on localhost by default. Uploaded videos are stored under `data/uploads/`; generated artifacts and process logs are stored under `outputs/jobs/`. Both directories are ignored by Git. The upload limit is 512 MB. The checkpoint and videos are not bundled with this repository, so obtain them from the team before running real inference.
 
@@ -225,6 +225,23 @@ Outputs generated:
 - `outputs/tracking/id_switch_candidates.csv`: Heuristic identity switch indicators.
 - `outputs/tracking/tracking_metadata.json`: Tracking configuration and hardware metrics.
 
+### KMT Tracker
+
+KMT is an image-space tracker with a sliding motion-history window, overlap-triggered momentum caching, ghost predictions for occlusions, and a speed gate during Hungarian association. Since the current detector exposes boxes but no appearance embeddings, KMT freezes its internal box/motion anchor inside overlap clusters while still returning the observed detection boxes for rendering and frame-level output. Ghost records are emitted only for gaps of 6–25 frames and are marked with `state=ghost` in the tracking output.
+
+Run it on the same video to compare it with the unchanged ByteTrack control:
+
+```bash
+uv run python scripts/run_tracking.py \
+    --video data/test_match.mp4 \
+    --weights weights/best.pt \
+    --homography data/homography_matrix.json \
+    --tracker kmt \
+    --output-dir outputs/kmt
+```
+
+KMT writes the same CSV/JSON and diagnostic artifacts as the ByteTrack path, with its annotated video saved as `kmt_annotated.mp4`. The tracker can also be selected in the local web dashboard. The existing `scripts/evaluate_tracking.py` currently constructs ByteTrack directly, so KMT benchmark comparison requires a later evaluator integration.
+
 ### C. Run Official Tracking Evaluation (Milestone 3A)
 
 ```bash
@@ -277,9 +294,10 @@ MotionXI/
 │   ├── detection/                # YOLOv11m detector wrapper
 │   │   ├── __init__.py
 │   │   └── detector.py
-│   ├── tracking/                 # ByteTrack wrapper, evaluation & types
+│   ├── tracking/                 # ByteTrack and KMT trackers, evaluation & types
 │   │   ├── __init__.py
 │   │   ├── bytetrack_tracker.py
+│   │   ├── kmt_tracker.py
 │   │   ├── evaluation.py
 │   │   └── track_types.py
 │   ├── projection/               # Pitch homography projection
@@ -293,11 +311,12 @@ MotionXI/
 │   ├── evaluate_tracking.py      # Official SoccerNet/TrackEval runner
 │   ├── run_detection.py          # Milestone 1 detection CLI
 │   └── run_tracking.py           # Milestone 2 ByteTrack CLI
-├── tests/                        # Automated pytest suite (32 tests)
+├── tests/                        # Automated pytest suite
 │   ├── test_detector.py
 │   ├── test_evaluation.py
 │   ├── test_homography.py
 │   ├── test_packaging.py
+│   ├── test_kmt_tracker.py
 │   ├── test_tracker.py
 │   └── test_video.py
 ├── data/                         # Datasets & calibration

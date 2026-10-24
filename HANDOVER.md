@@ -50,7 +50,7 @@ Kinematic Memory Tracker (KMT) is our physics-grounded research extension design
 
 ### Baseline vs. Research Target
 - **ByteTrack Baseline:** Serves as the frozen, unmodified control tracker. It has been evaluated against ground truth to document exact failure modes.
-- **KMT Target:** Evaluated against ByteTrack on identical video sequences, detection inputs, and metrics to isolate and measure the tracking performance gain.
+- **KMT Target:** To be evaluated against ByteTrack on identical video sequences, detection inputs, and metrics to isolate and measure the tracking performance gain.
 
 ### Component Implementation Status
 | Component | Status | Implementation Details |
@@ -60,7 +60,7 @@ Kinematic Memory Tracker (KMT) is our physics-grounded research extension design
 | **SoccerNet GT Evaluation** | **Completed** | Automated benchmark using `trackeval` over 5 held-out sequences (3,750 frames). |
 | **Failure Mode Audit** | **Completed** | Quantified ID switches, cluster collapses, and occlusion recovery rates. |
 | **4-Point Pitch Homography** | **Baseline Available** | `scripts/calibrate_pitch.py`, `data/homography_matrix.json`, boundary validation logic. |
-| **Kinematic Memory Tracker** | **Pending** | Milestone 4 primary research objective. |
+| **Kinematic Memory Tracker** | **Implementation Available; Evaluation Pending** | `courtvision/tracking/kmt_tracker.py` implements image-space momentum caching, cluster states, ghost predictions, and speed-gated Hungarian association. Select it with `scripts/run_tracking.py --tracker kmt`; unit tests are added but have not yet been run. |
 | **Kit Color Clustering** | **Pending** | Upper-body HSV K-means clustering for team assignment. |
 | **Physical Analytics Engine** | **Pending** | Sprint detection ($>25\text{ km/h}$), distance covered, 2D KDE heatmaps. |
 | **FastAPI & Dashboard** | **Pending** | REST backend and interactive tactical dashboard. |
@@ -269,8 +269,8 @@ To prevent merge conflicts and preserve research discipline, the three team memb
 
 | Role | Team Member | Primary Responsibilities | Deliverables & Handoffs |
 |---|---|---|---|
-| **Tracking Research** | **Member 1** | 1. Implement `kmt_tracker.py` under `courtvision/tracking/`.<br>2. Build momentum caching, ghost trajectory extrapolation, and kinematic consistency gating.<br>3. Keep `bytetrack_tracker.py` unchanged as control.<br>4. Expose identical tracker interface: `update(detections, frame_idx) -> List[Track]`. | **Handoff to Member 2:** Stable KMT tracker module ready for automated benchmark evaluation. |
-| **Evaluation & Benchmark** | **Member 2** | 1. Maintain and lock evaluation protocol (`scripts/evaluate_tracking.py`).<br>2. Benchmark KMT against ByteTrack baseline on the 5 SoccerNet sequences.<br>3. Run ablation experiments on memory window ($\Delta t \in [5, 15, 30]$ frames) and kinematic gating thresholds.<br>4. Generate final comparison tables (HOTA, AssA, MOTA, IDSW, Frag, FPS). | **Handoff to Team:** Verified experimental evidence showing whether KMT outperforms ByteTrack. |
+| **Tracking Research** | **Member 1** | 1. Implemented `kmt_tracker.py` under `courtvision/tracking/` with momentum caching, ghost predictions, and speed-gated association.<br>2. Added `--tracker kmt` to the tracking CLI and dashboard.<br>3. Keep `bytetrack_tracker.py` unchanged as control.<br>4. Run the new focused tests and real-video smoke test once assets are available. | **Handoff to Member 2:** KMT implementation is ready for benchmark integration; its focused tests have not yet been run. |
+| **Evaluation & Benchmark** | **Member 2** | 1. Maintain and lock evaluation protocol (`scripts/evaluate_tracking.py`).<br>2. Add tracker selection to the evaluator, then benchmark KMT against ByteTrack on the 5 SoccerNet sequences.<br>3. Run ablation experiments on memory window ($\Delta t \in [5, 15, 30]$ frames) and kinematic gating thresholds.<br>4. Generate final comparison tables (HOTA, AssA, MOTA, IDSW, Frag, FPS). | **Handoff to Team:** Verified experimental evidence showing whether KMT outperforms ByteTrack. |
 | **Calibration & Analytics** | **Member 3** | 1. Audit and validate pitch homography across multiple pitch regions.<br>2. Investigate full-pitch calibration using additional pitch markings (halfway line, center circle, penalty spots).<br>3. Analyze camera PTZ dynamics and evaluate per-shot / dynamic recalibration.<br>4. Build kit color clustering (upper-body HSV K-means) for team separation.<br>5. Prototype physical analytics (speeds, distances, heatmaps) in `courtvision/analytics/`. | **Handoff to Team:** Validated pitch coordinate transformation with documented error bounds. |
 
 ---
@@ -288,9 +288,9 @@ To prevent merge conflicts and preserve research discipline, the three team memb
 
 ### Immediate Action Checklist
 - [x] **Git Remote Verified:** `origin/main` is up-to-date with remote repository.
-- [ ] **Teammate Onboarding:** Members 2 & 3 clone `MotionXI`, run `uv sync`, and confirm `uv run pytest -v` (32 tests passing).
+- [ ] **Teammate Onboarding:** Members 2 & 3 clone `MotionXI`, run `uv sync`, and confirm the automated test suite with `uv run pytest -v`.
 - [ ] **Asset Distribution:** Place `weights/best.pt`, `data/test_match.mp4`, and `data/soccernet_tracking/` in local workspaces.
 - [ ] **Branch Creation:** Create `feat/kmt-tracker`, `feat/kmt-eval-ablation`, and `feat/pitch-calibration-analytics`.
-- [ ] **Member 1 (KMT):** Begin implementation of momentum state caching and ghost trajectory extrapolation in `kmt_tracker.py`.
-- [ ] **Member 2 (Eval):** Verify `evaluate_tracking.py` outputs and prepare baseline configuration for KMT comparison.
+- [x] **Member 1 (KMT):** Implement tracker module, CLI selection, and unit-test cases; focused tests and real-video validation remain to be run.
+- [ ] **Member 2 (Eval):** Add KMT selection to `evaluate_tracking.py`, verify baseline outputs, and benchmark against ByteTrack.
 - [ ] **Member 3 (Calibration):** Begin landmark reprojection error tests on visible pitch markings and document camera PTZ drift.

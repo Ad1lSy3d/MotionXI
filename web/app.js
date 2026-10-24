@@ -10,6 +10,8 @@ const modelNotice = document.querySelector("#model-notice");
 const videoTrack = document.querySelector("#video-track");
 const heroTitle = document.querySelector("#hero-title");
 const heroSub = document.querySelector("#hero-sub");
+const trackerChoice = document.querySelector("#tracker-choice");
+const trackerSelect = document.querySelector("#tracker-select");
 const modeText = {
   tracking: "Player tracking: detection with persistent IDs and trails.",
   detection: "Detection only: player bounding boxes in every frame.",
@@ -78,7 +80,7 @@ function syncSelection() {
   const selected = videoSelect.selectedOptions[0];
   heroTitle.textContent = id && selected ? selected.textContent : "Choose a video";
   heroSub.textContent = id
-    ? modeText[currentMode()]
+    ? `${modeText[currentMode()]}${currentMode() === "tracking" ? ` Tracker: ${trackerSelect.value === "kmt" ? "KMT" : "ByteTrack"}.` : ""}`
     : "Pick a match video below or upload a new one to get started.";
 }
 
@@ -183,7 +185,7 @@ function showJob(job) {
   jobState.dataset.status = job.status;
   document.querySelector("#nav-results").dataset.running = String(job.status === "running");
   document.querySelector("#job-summary").textContent =
-    `${job.mode === "tracking" ? "ByteTrack tracking" : "Detection"} · ${job.video_name}`;
+    `${job.mode === "tracking" ? `${job.tracker === "kmt" ? "KMT" : "ByteTrack"} tracking` : "Detection"} · ${job.video_name}`;
   renderOutputs(job);
   document.querySelector("#log-output").textContent = job.log || "Waiting for pipeline output…";
   runButton.disabled = job.status === "running";
@@ -224,10 +226,11 @@ async function startPipeline() {
   runButton.disabled = true;
   try {
     const mode = document.querySelector('input[name="mode"]:checked').value;
+    const tracker = trackerSelect.value;
     const job = await requestJson("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video_id: videoSelect.value, mode }),
+      body: JSON.stringify({ video_id: videoSelect.value, mode, tracker }),
     });
     currentJobId = job.id;
     showJob(job);
@@ -255,9 +258,12 @@ document.querySelectorAll('input[name="mode"]').forEach((input) => {
   input.addEventListener("change", () => {
     document.querySelectorAll(".mode-option").forEach((option) => option.classList.remove("selected"));
     input.closest(".mode-option").classList.add("selected");
+    trackerChoice.hidden = input.value !== "tracking";
     syncSelection();
   });
 });
+trackerSelect.addEventListener("change", syncSelection);
+trackerChoice.hidden = currentMode() !== "tracking";
 
 refreshDashboard();
 

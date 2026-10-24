@@ -16,6 +16,7 @@ import torch
 from courtvision.detection.detector import PlayerDetector
 from courtvision.projection.homography import PitchHomography
 from courtvision.tracking.bytetrack_tracker import FootballByteTracker
+from courtvision.tracking.kmt_tracker import KinematicMemoryTracker
 from courtvision.tracking.track_types import TrackedPlayer
 from courtvision.utils.video import (
     VideoMetadata,
@@ -28,7 +29,7 @@ from courtvision.utils.video import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="CourtVision AI - Milestone 2: YOLOv11m + ByteTrack Baseline Pipeline"
+        description="CourtVision AI - YOLOv11m player tracking (ByteTrack baseline or KMT)"
     )
     parser.add_argument(
         "--video",
@@ -103,6 +104,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=15,
         help="Visualization trail history length in frames (default: 15)",
+    )
+    parser.add_argument(
+        "--tracker",
+        choices=("bytetrack", "kmt"),
+        default="bytetrack",
+        help="Tracker implementation to use (default: bytetrack)",
     )
     parser.add_argument(
         "--no-video",
@@ -199,7 +206,14 @@ def main() -> None:
     diag_dir.mkdir(parents=True, exist_ok=True)
 
     print("==================================================")
-    print("COURTVISION AI: MILESTONE 2 BYTETRACK BASELINE")
+    print(
+        "COURTVISION AI: "
+        + (
+            "MILESTONE 2 BYTETRACK BASELINE"
+            if args.tracker == "bytetrack"
+            else "MILESTONE 4 KINEMATIC MEMORY TRACKER"
+        )
+    )
     print("==================================================")
     print(f"Input Video:      {video_path}")
     print(f"Model Checkpoint: {weights_path}")
@@ -231,19 +245,38 @@ def main() -> None:
     )
     print(f"Detector Device:  {detector.device.upper()}")
 
-    # 4. ByteTrack Baseline Initialization
-    tracker = FootballByteTracker(
-        track_activation_threshold=args.track_thresh,
-        lost_track_buffer=args.track_buffer,
-        minimum_matching_threshold=args.match_thresh,
-        frame_rate=int(round(metadata.fps)),
-        homography=homography,
-        trail_length=args.trail_length,
-    )
-    print(f"Tracker:          ByteTrack (activation={args.track_thresh}, buffer={args.track_buffer}f, match={args.match_thresh})")
+    # 4. Tracker Initialization
+    if args.tracker == "kmt":
+        tracker = KinematicMemoryTracker(
+            homography=homography,
+            trail_length=args.trail_length,
+        )
+        tracker_name = "KMT"
+        annotated_filename = "kmt_annotated.mp4"
+        print(
+            "Tracker:          Kinematic Memory Tracker "
+            f"(cluster IoU={tracker.cluster_iou_threshold}, "
+            f"ghost={tracker.min_ghost_frames}-{tracker.max_ghost_frames}f, "
+            f"speed gate={tracker.max_implied_speed_px_per_frame}px/frame)"
+        )
+    else:
+        tracker = FootballByteTracker(
+            track_activation_threshold=args.track_thresh,
+            lost_track_buffer=args.track_buffer,
+            minimum_matching_threshold=args.match_thresh,
+            frame_rate=int(round(metadata.fps)),
+            homography=homography,
+            trail_length=args.trail_length,
+        )
+        tracker_name = "ByteTrack"
+        annotated_filename = "bytetrack_annotated.mp4"
+        print(
+            f"Tracker:          ByteTrack (activation={args.track_thresh}, "
+            f"buffer={args.track_buffer}f, match={args.match_thresh})"
+        )
 
     # 5. Video Writer Initialization
-    annotated_video_path = output_dir / "bytetrack_annotated.mp4"
+    annotated_video_path = output_dir / annotated_filename
     video_writer = None
     if not args.no_video:
         video_writer = create_video_writer(
@@ -344,6 +377,7 @@ def main() -> None:
                 track_ms=track_ms,
                 total_unique_ids=total_unique_so_far,
                 device_name=detector.device,
+                tracker_name=tracker_name,
             )
 
             # Cache frame for potential diagnostic snapshot
@@ -455,7 +489,11 @@ def main() -> None:
 
     tracking_metadata: Dict[str, Any] = {
         "pipeline_version": "0.2.0",
-        "milestone": "Milestone 2: ByteTrack Baseline",
+        "milestone": (
+            "Milestone 2: ByteTrack Baseline"
+            if args.tracker == "bytetrack"
+            else "Milestone 4: Kinematic Memory Tracker"
+        ),
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "detector": {
             "model": "YOLOv11m",
@@ -514,7 +552,12 @@ def main() -> None:
     print(f"Saved tracking metadata JSON:   {metadata_path}")
 
     print("\n==================================================")
-    print("BYTETRACK BASELINE RUN SUMMARY")
+    summary_title = (
+        "BYTETRACK BASELINE RUN SUMMARY"
+        if args.tracker == "bytetrack"
+        else "KMT RUN SUMMARY"
+    )
+    print(summary_title)
     print("==================================================")
     print(f"Decoded Frames:         {frame_idx} (Container reported: {metadata.container_frame_count})")
     print(f"Total Unique Tracks:    {track_stats['total_unique_track_ids']}")
