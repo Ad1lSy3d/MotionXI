@@ -108,6 +108,23 @@ The test suite covers:
 - Synthetic identity swap, track fragmentation, and occlusion recovery metrics
 - Package imports and graceful error handling for missing models/videos
 
+## Local Web Dashboard
+
+The project includes a small local dashboard for running the existing detection and ByteTrack pipelines. It does not add a separate web UI framework or change the underlying pipelines.
+
+1. Install the project environment with `uv sync`.
+2. Place the team-provided model checkpoint at `weights/best.pt`.
+3. Start the local server from the repository root:
+
+   ```powershell
+   uv run uvicorn courtvision.server:app --reload
+   ```
+
+4. Open `http://127.0.0.1:8000` in your browser.
+5. Upload a match video in the dashboard or place it directly in `data/`, then select **Player tracking** or **Player detection only** and run the pipeline.
+
+The dashboard serves only on localhost by default. Uploaded videos are stored under `data/uploads/`; generated artifacts and process logs are stored under `outputs/jobs/`. Both directories are ignored by Git. The upload limit is 512 MB. The checkpoint and videos are not bundled with this repository, so obtain them from the team before running real inference.
+
 ---
 
 ## 7. Model Checkpoint Instructions

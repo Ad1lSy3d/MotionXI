@@ -50,6 +50,7 @@ tmp/
 # Local datasets and benchmark data
 data/soccernet_tracking/
 data/raw/
+data/uploads/
 *.zip
 *.tar.gz
 !data/homography_matrix.json

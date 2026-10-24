@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#141414">
+    <title>CourtVision</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <aside class="rail">
+      <a class="brand" href="#home" aria-label="CourtVision home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="label">CourtVision</span>
+      </a>
+
+      <nav class="nav" aria-label="Main">
+        <a class="nav-link active" href="#home" data-nav="home">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-8.5Z"/></svg>
+          <span class="label">Home</span>
+        </a>
+        <a class="nav-link" href="#results" data-nav="results" id="nav-results" data-running="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9.5 5 2.5-5 2.5v-5Z"/></svg>
+          <span class="label">Results</span>
+          <span class="nav-dot" aria-hidden="true"></span>
+        </a>
+      </nav>
+
+      <div class="rail-note">
+        <span class="status-indicator ready"></span>
+        <span class="label">Runs locally on this machine</span>
+      </div>
+    </aside>
+
+    <main>
+      <!-- Home -->
+      <section data-view="home" aria-labelledby="hero-title">
+        <div class="hero">
+          <div class="hero-inner">
+            <ul class="chips" aria-label="System readiness">
+              <li><span class="status-indicator" id="model-indicator"></span>Detector <b id="model-status">Checking…</b></li>
+              <li><span class="status-indicator" id="homography-indicator"></span>Calibration <b id="homography-status">Checking…</b></li>
+              <li><b id="video-count">—</b> videos</li>
+            </ul>
+            <span id="model-detail" hidden></span>
+
+            <h1 id="hero-title">Choose a video</h1>
+            <p class="hero-sub" id="hero-sub"></p>
+
+            <div class="hero-actions">
+              <button class="button" id="run-button" type="button">
+                <span>Run pipeline</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15a.8.8 0 0 0 1.2.7l12-7.5a.8.8 0 0 0 0-1.4l-12-7.5A.8.8 0 0 0 7 4.5Z"/></svg>
+              </button>
+            </div>
+            <div class="inline-message" id="run-message" role="status"></div>
+
+            <div class="notice" id="model-notice" hidden>
+              <p><strong>Model checkpoint missing.</strong> Add <code>weights/best.pt</code> to run a pipeline.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="rows">
+          <div class="row">
+            <div class="row-head">
+              <h2>Match videos</h2>
+              <button class="icon-button" id="refresh-videos" type="button" title="Refresh video list" aria-label="Refresh video list">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5"/></svg>
+              </button>
+            </div>
+            <select id="video-select" hidden aria-hidden="true" tabindex="-1"><option value="">Loading videos…</option></select>
+            <div class="track" id="video-track" role="radiogroup" aria-label="Match videos">
+              <label class="card card-add" for="video-file">
+                <span class="poster"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
+                <span class="card-title">Upload video</span>
+                <span class="card-meta">MP4, MOV, AVI, MKV · up to 512 MB</span>
+              </label>
+            </div>
+            <input id="video-file" type="file" accept=".mp4,.mov,.avi,.mkv,video/*" hidden>
+            <div id="upload-message" class="inline-message" role="status"></div>
+          </div>
+
+          <div class="row">
+            <div class="row-head"><h2>Pipeline</h2></div>
+            <fieldset class="mode-fieldset">
+              <legend class="sr-only">Choose what to run</legend>
+              <label class="mode-option selected">
+                <input type="radio" name="mode" value="tracking" checked>
+                <span class="radio-visual"></span>
+                <span class="mode-copy"><strong>Player tracking</strong><small>Detection with persistent IDs and trails</small></span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="mode" value="detection">
+                <span class="radio-visual"></span>
+                <span class="mode-copy"><strong>Detection only</strong><small>Player bounding boxes in every frame</small></span>
+              </label>
+            </fieldset>
+          </div>
+        </div>
+      </section>
+
+      <!-- Results -->
+      <section data-view="results" aria-labelledby="results-title" hidden>
+        <div class="page">
+          <header class="page-head">
+            <h1 id="results-title">Results</h1>
+            <span class="job-state" id="job-state">ready</span>
+          </header>
+
+          <div class="panel" aria-live="polite">
+            <div class="empty-state" id="empty-state">
+              <p>Nothing to watch yet. Run a pipeline and the annotated video, data files and log will show up here.</p>
+              <a class="link" href="#home">Choose a video</a>
+            </div>
+
+            <div id="job-results" class="job-results" hidden>
+              <div class="job-summary" id="job-summary"></div>
+              <div id="preview-container" class="preview-container" hidden>
+                <video id="preview-video" controls playsinline></video>
+              </div>
+              <div class="output-list" id="output-list"></div>
+              <div class="log-heading">
+                <span>Process log</span>
+                <button class="text-button" id="toggle-log" type="button">Show log</button>
+              </div>
+              <pre class="log-output" id="log-output" hidden></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
