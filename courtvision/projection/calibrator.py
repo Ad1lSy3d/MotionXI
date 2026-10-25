@@ -5,11 +5,11 @@ Full-pitch homography calibration for CourtVision AI.
 
 Coordinate Convention
 ---------------------
-This module uses the following 105 m × 68 m FIFA pitch coordinate frame:
+This module uses the standard 105 m × 68 m FIFA pitch coordinate frame:
 
-    Origin (0, 0) ← Near goal line, near touchline (left end, bottom edge)
+    Origin (0, 0) ← Left goal-line / near touchline intersection
 
-         Y (width, 0 → 68 m)
+         Y (width, 0 → 68 m, near touchline → far touchline)
          |
     0,68 +-----------------------------------+ 105,68   ← far touchline
          |                                   |
@@ -29,31 +29,36 @@ Calibration workflow
 --------------------
 1. Instantiate ``HomographyCalibrator``.
 2. Add correspondences via ``add_correspondence(pixel_x, pixel_y, pitch_x, pitch_y)``.
-   Use clearly identified landmarks in the video frame.
-3. Call ``estimate()`` to compute the homography using RANSAC + refinement.
-4. Inspect the returned ``CalibrationResult`` for reprojection errors, coverage,
-   inlier count, and warnings.
+   Use clearly identified landmarks across the pitch.
+3. Call ``estimate()`` to compute the homography using OpenCV RANSAC + refinement.
+4. Inspect the returned ``CalibrationResult`` for inlier count, error residuals,
+   coverage metrics, calibrated-zone bounds, and warnings.
 5. Save via ``save(path)`` to a metadata-rich JSON file.
-6. Load via ``PitchHomography(path)`` (backward-compatible with both legacy and
-   rich JSON formats).
+6. Load via ``PitchHomography(path)`` (backward-compatible with both legacy bare-matrix
+   and rich JSON formats).
 
-Fundamental limitations
------------------------
-* A single static homography assumes a flat planar pitch and a static camera.
-  Any camera pan, tilt, zoom, or cut will introduce errors not caught by this
-  calibration. A single homography cannot compensate for dynamic camera motion.
-* Projection accuracy degrades for landmarks far from the calibrated region.
-* Minimum 4 non-collinear correspondences are required; ≥ 8 well-distributed
-  correspondences are recommended for reliable full-pitch coverage.
+Fundamental limitations & Error Interpretation
+----------------------------------------------
+* Image-space reprojection error (px) measures residual error between the
+  clicked image pixel and the back-projected pitch landmark via H_inv.
+* Forward-projection error (m) measures the metric deviation between the true
+  landmark coordinates on the pitch plane and the projected image point via H.
+* Low residuals on training landmarks DO NOT prove high real-world accuracy across
+  the pitch. Sparse landmarks, lens distortion, rolling shutter, elevation angle,
+  and camera panning/zooming induce localized projection errors that training
+  residuals cannot detect.
+* A single static homography assumes a flat pitch plane and a stationary camera.
+  Footage with panning, zooming, tilting, or broadcast camera cuts requires
+  per-shot recalibration or dynamic motion compensation.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -65,7 +70,7 @@ import numpy as np
 
 PITCH_LANDMARKS: Dict[str, Tuple[float, float]] = {
     # Left penalty area (goal at X=0)
-    "left_goal_near_post":        (0.0,   0.0 + 13.84 + 3.66),   # (0, 17.5) centre offset
+    "left_goal_near_post":        (0.0,   17.5),
     "left_goal_line_near_pa":     (0.0,   13.84),
     "left_goal_line_far_pa":      (0.0,   54.16),
     "left_pa_near_corner":        (16.5,  13.84),
@@ -96,10 +101,10 @@ PITCH_LANDMARKS: Dict[str, Tuple[float, float]] = {
     "corner_far_right":           (105.0, 68.0),
 }
 
-# Minimum landmarks required for a viable estimate
+# Minimum correspondences required for mathematical homography estimation
 MIN_CORRESPONDENCES: int = 4
 # Recommended for reliable full-pitch coverage
-RECOMMENDED_CORRESPONDENCES: int = 8
+RECOMMENDED_CORRESPONDENCES: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -121,38 +126,59 @@ class LandmarkCorrespondence:
 class CalibrationResult:
     """Result from ``HomographyCalibrator.estimate()``.
 
-    All reprojection errors are in image pixels (image-space RMS).
-    Pitch-space errors (in metres) are also reported where available.
+    Contains separated image-space reprojection errors (px) and forward
+    pitch-plane errors (m), broken down by inliers and overall set.
     """
-    H: np.ndarray                     # 3×3 homography matrix (image → pitch)
-    inlier_count: int                 # RANSAC inliers
-    total_correspondences: int        # Total correspondences provided
-    rms_reprojection_px: float        # RMS reprojection error in image pixels
-    max_reprojection_px: float        # Max reprojection error in image pixels
-    rms_reprojection_m: float         # RMS error projecting pitch back to image and measuring pitch deviation
-    per_point_errors_px: List[float]  # Per-point reprojection errors in pixels
-    inlier_mask: List[bool]           # Which correspondences are inliers
-    coverage_score: float             # [0, 1] geometric coverage across pitch (convex-hull area fraction)
-    quadrant_coverage: Dict[str, bool]  # Which pitch thirds are covered by inlier points
-    warnings: List[str]               # Human-readable warnings
-    calibration_scope: str            # 'full_pitch', 'partial', 'penalty_box_region'
-    is_valid: bool                    # True if H is finite and non-degenerate
+    H: np.ndarray                              # 3×3 homography matrix (image → pitch)
+    inlier_count: int                          # RANSAC inliers count
+    total_correspondences: int                 # Total correspondences provided
+    rms_reprojection_px: float                 # Inlier RMS image-space reprojection error (pixels)
+    max_reprojection_px: float                 # Inlier max image-space reprojection error (pixels)
+    rms_reprojection_m: float                  # Inlier RMS forward-projection error (metres)
+    max_reprojection_m: float                  # Inlier max forward-projection error (metres)
+    overall_rms_reprojection_px: float         # Overall RMS image-space reprojection error across all points (pixels)
+    overall_rms_reprojection_m: float          # Overall RMS forward-projection error across all points (metres)
+    per_point_errors_px: List[float]           # Per-point image-space reprojection errors (pixels)
+    per_point_errors_m: List[float]            # Per-point forward-projection errors (metres)
+    inlier_mask: List[bool]                    # Which correspondences are RANSAC inliers
+    coverage_score: float                      # Convex-hull area of inliers divided by pitch area [0, 1]
+    quadrant_coverage: Dict[str, bool]         # Coverage indicators for pitch regions
+    calibrated_zone_m: Dict[str, List[float]]  # Documented valid pitch bounding box {"x_range": [x_min, x_max], "y_range": [y_min, y_max]}
+    warnings: List[str]                        # Explicit warnings regarding coverage and accuracy limitations
+    calibration_scope: str                     # 'full_pitch', 'partial', or 'penalty_box_region'
+    is_valid: bool                             # True if H is finite, non-degenerate, and invertible
 
     def to_dict(self) -> Dict[str, Any]:
-        """JSON-serializable summary."""
+        """Return JSON-serializable dictionary with documented metric descriptions."""
         return {
             "inlier_count": self.inlier_count,
             "total_correspondences": self.total_correspondences,
             "rms_reprojection_px": self.rms_reprojection_px,
             "max_reprojection_px": self.max_reprojection_px,
             "rms_reprojection_m": self.rms_reprojection_m,
+            "max_reprojection_m": self.max_reprojection_m,
+            "overall_rms_reprojection_px": self.overall_rms_reprojection_px,
+            "overall_rms_reprojection_m": self.overall_rms_reprojection_m,
             "per_point_errors_px": self.per_point_errors_px,
+            "per_point_errors_m": self.per_point_errors_m,
             "inlier_mask": self.inlier_mask,
             "coverage_score": self.coverage_score,
             "quadrant_coverage": self.quadrant_coverage,
+            "calibrated_zone_m": self.calibrated_zone_m,
             "warnings": self.warnings,
             "calibration_scope": self.calibration_scope,
             "is_valid": self.is_valid,
+            "metric_definitions": {
+                "rms_reprojection_px": "Inlier root-mean-square error in image pixels: ||H_inv * X_pitch - x_pixel||.",
+                "rms_reprojection_m": "Inlier root-mean-square error in pitch metres: ||H * x_pixel - X_pitch||.",
+                "overall_rms_reprojection_px": "RMS image pixel error across all input correspondences (including RANSAC outliers).",
+                "overall_rms_reprojection_m": "RMS pitch metre error across all input correspondences (including RANSAC outliers).",
+                "coverage_score": "Ratio of inlier landmarks convex hull area to total pitch area (105 m x 68 m = 7140 m2).",
+                "limitation_note": (
+                    "Low training-landmark residuals do not guarantee projection accuracy across uncalibrated "
+                    "or sparse pitch regions. Planar perspective divergence increases with distance from landmarks."
+                ),
+            },
         }
 
 
@@ -167,9 +193,8 @@ def _compute_reprojection_errors_px(
 ) -> Tuple[List[float], float, float]:
     """Compute per-point image-space reprojection errors.
 
-    We project pitch coordinates back to image space using H_inv and measure
-    pixel distance from the original clicked pixel.  This captures round-trip
-    accuracy in the observable (pixel) space.
+    Maps pitch landmarks back to image coordinates using H_inv and calculates
+    Euclidean pixel distance from the observed pixel: ||H_inv * X_pitch - x_pixel||.
 
     Returns
     -------
@@ -179,22 +204,10 @@ def _compute_reprojection_errors_px(
         H_inv = np.linalg.inv(H)
     except np.linalg.LinAlgError:
         n = len(correspondences)
-        inf_list = [float("inf")] * n
-        return inf_list, float("inf"), float("inf")
+        return [float("inf")] * n, float("inf"), float("inf")
 
     errors_px: List[float] = []
     for c in correspondences:
-        # Forward: pixel → pitch
-        vec = np.array([c.pixel_x, c.pixel_y, 1.0], dtype=np.float64)
-        proj = H @ vec
-        if abs(proj[2]) < 1e-9:
-            errors_px.append(float("inf"))
-            continue
-        px_proj = proj[0] / proj[2]
-        py_proj = proj[1] / proj[2]
-        err_m = math.sqrt((px_proj - c.pitch_x) ** 2 + (py_proj - c.pitch_y) ** 2)
-
-        # Back-project: pitch → pixel using H_inv
         pvec = np.array([c.pitch_x, c.pitch_y, 1.0], dtype=np.float64)
         back = H_inv @ pvec
         if abs(back[2]) < 1e-9:
@@ -212,14 +225,45 @@ def _compute_reprojection_errors_px(
     return errors_px, rms, max(finite)
 
 
+def _compute_forward_errors_m(
+    H: np.ndarray,
+    correspondences: List[LandmarkCorrespondence],
+) -> Tuple[List[float], float, float]:
+    """Compute per-point forward pitch-space projection errors in metres.
+
+    Maps clicked image pixels to the pitch plane using H and calculates
+    metric Euclidean distance from the ground-truth pitch landmark:
+    ||H * x_pixel - X_pitch||.
+
+    Returns
+    -------
+    (per_point_m, rms_m, max_m)
+    """
+    errors_m: List[float] = []
+    for c in correspondences:
+        vec = np.array([c.pixel_x, c.pixel_y, 1.0], dtype=np.float64)
+        proj = H @ vec
+        if abs(proj[2]) < 1e-9:
+            errors_m.append(float("inf"))
+            continue
+        px_proj = proj[0] / proj[2]
+        py_proj = proj[1] / proj[2]
+        err_m = math.sqrt((px_proj - c.pitch_x) ** 2 + (py_proj - c.pitch_y) ** 2)
+        errors_m.append(err_m)
+
+    finite = [e for e in errors_m if math.isfinite(e)]
+    if not finite:
+        return errors_m, float("inf"), float("inf")
+    rms = math.sqrt(sum(e ** 2 for e in finite) / len(finite))
+    return errors_m, rms, max(finite)
+
+
 def compute_reprojection_errors(
     H: np.ndarray,
     pixel_points: np.ndarray,
     pitch_points: np.ndarray,
 ) -> Tuple[np.ndarray, float, float]:
-    """Compute image-space reprojection errors for arrays of corresponding points.
-
-    Convenient public function for use in tests and external callers.
+    """Public helper to compute image-space reprojection errors for point arrays.
 
     Parameters
     ----------
@@ -251,7 +295,7 @@ def compute_reprojection_errors(
 
 
 # ---------------------------------------------------------------------------
-# Coverage scoring
+# Coverage & Scope Classification
 # ---------------------------------------------------------------------------
 
 
@@ -259,28 +303,45 @@ def _compute_coverage(
     pitch_points: List[Tuple[float, float]],
     pitch_length: float = 105.0,
     pitch_width: float = 68.0,
-) -> Tuple[float, Dict[str, bool]]:
-    """Score how well the calibration points cover the pitch.
+) -> Tuple[float, Dict[str, bool], Dict[str, float]]:
+    """Score spatial pitch coverage based on inlier landmark geometry.
 
-    Coverage score: convex-hull area of inlier pitch points divided by pitch area.
-    Maximum theoretical score is 1.0 when points span the full pitch.
-
-    Quadrant coverage: True when ≥1 inlier point falls in each pitch third.
+    Returns
+    -------
+    (coverage_score, quadrant_coverage, span_dict)
     """
-    pts = [(x, y) for x, y in pitch_points
-           if 0.0 <= x <= pitch_length and 0.0 <= y <= pitch_width]
-
+    pts = [
+        (x, y) for x, y in pitch_points
+        if 0.0 <= x <= pitch_length and 0.0 <= y <= pitch_width
+    ]
     total_area = pitch_length * pitch_width  # 7140 m²
 
     quadrants: Dict[str, bool] = {
         "left_third":   any(x <= pitch_length / 3 for x, _ in pts),
         "middle_third": any(pitch_length / 3 < x <= 2 * pitch_length / 3 for x, _ in pts),
         "right_third":  any(x > 2 * pitch_length / 3 for x, _ in pts),
+        "near_half":    any(y <= pitch_width / 2 for _, y in pts),
+        "far_half":     any(y > pitch_width / 2 for _, y in pts),
+    }
+
+    if not pts:
+        spans = {
+            "x_min": 0.0, "x_max": 0.0, "x_span": 0.0,
+            "y_min": 0.0, "y_max": 0.0, "y_span": 0.0,
+        }
+        return 0.0, quadrants, spans
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    spans = {
+        "x_min": x_min, "x_max": x_max, "x_span": x_max - x_min,
+        "y_min": y_min, "y_max": y_max, "y_span": y_max - y_min,
     }
 
     if len(pts) < 3:
-        # Cannot compute a convex hull with fewer than 3 points
-        return min(len(pts) / RECOMMENDED_CORRESPONDENCES, 1.0) * 0.1, quadrants
+        return 0.0, quadrants, spans
 
     try:
         pts_arr = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
@@ -290,21 +351,68 @@ def _compute_coverage(
     except Exception:
         score = 0.0
 
-    return score, quadrants
+    return score, quadrants, spans
 
 
 def _classify_scope(
     coverage_score: float,
     quadrant_coverage: Dict[str, bool],
+    spans: Dict[str, float],
     n_inliers: int,
+    inlier_rms_px: float,
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
 ) -> str:
-    """Return a calibration scope label."""
-    all_thirds = all(quadrant_coverage.values())
-    if all_thirds and coverage_score >= 0.30 and n_inliers >= 8:
+    """Classify calibration scope conservatively.
+
+    Criteria for 'full_pitch':
+    1. At least 10 inliers (n_inliers >= 10).
+    2. Landmarks present in all three pitch thirds (left, middle, right).
+    3. Landmarks present on both width halves (near and far touchlines).
+    4. Pitch length span >= 70% of pitch length (spans['x_span'] >= 0.70 * pitch_length).
+    5. Pitch width span >= 60% of pitch width (spans['y_span'] >= 0.60 * pitch_width).
+    6. Extremities reach deep into both halves (x_min <= 20.0 and x_max >= 85.0).
+    7. Convex hull coverage score >= 0.50 (at least 50% of pitch enclosed).
+    8. Inlier RMS reprojection error <= 4.0 px.
+
+    If these conditions are not all met, the calibration is classified as 'partial'
+    (or 'penalty_box_region' if points are confined to a single penalty box area).
+    """
+    all_thirds = (
+        quadrant_coverage.get("left_third", False)
+        and quadrant_coverage.get("middle_third", False)
+        and quadrant_coverage.get("right_third", False)
+    )
+    both_width_halves = (
+        quadrant_coverage.get("near_half", False)
+        and quadrant_coverage.get("far_half", False)
+    )
+    length_span_ok = spans["x_span"] >= (0.70 * pitch_length)
+    width_span_ok = spans["y_span"] >= (0.60 * pitch_width)
+    extremities_ok = (spans["x_min"] <= 20.0) and (spans["x_max"] >= (pitch_length - 20.0))
+    area_ok = coverage_score >= 0.50
+    inliers_ok = n_inliers >= RECOMMENDED_CORRESPONDENCES
+    error_ok = inlier_rms_px <= 4.0
+
+    if (
+        all_thirds
+        and both_width_halves
+        and length_span_ok
+        and width_span_ok
+        and extremities_ok
+        and area_ok
+        and inliers_ok
+        and error_ok
+    ):
         return "full_pitch"
-    if coverage_score >= 0.05 or n_inliers >= 4:
-        return "partial"
-    return "penalty_box_region"
+
+    # Check if confined to a single penalty box
+    is_left_pa = (spans["x_max"] <= 25.0) and (10.0 <= spans["y_min"] <= spans["y_max"] <= 58.0)
+    is_right_pa = (spans["x_min"] >= (pitch_length - 25.0)) and (10.0 <= spans["y_min"] <= spans["y_max"] <= 58.0)
+    if is_left_pa or is_right_pa:
+        return "penalty_box_region"
+
+    return "partial"
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +429,9 @@ class HomographyCalibrator:
 
         cal = HomographyCalibrator()
         cal.add_correspondence(820, 655, 16.5, 54.16, label="left_pa_far_corner")
-        cal.add_correspondence(43, 408, 16.5, 13.84, label="left_pa_near_corner")
-        # ... add ≥ 8 well-distributed correspondences ...
+        # ... add >= 10 well-distributed correspondences across the pitch ...
         result = cal.estimate()
-        print(result.rms_reprojection_px, result.warnings)
+        print(f"Scope: {result.calibration_scope}, Inlier RMS: {result.rms_reprojection_px:.2f} px")
         cal.save("data/homography_full_pitch.json")
 
     Parameters
@@ -334,8 +441,7 @@ class HomographyCalibrator:
     pitch_width:
         Pitch width in meters (default 68.0).
     ransac_threshold:
-        RANSAC reprojection threshold in pixels.  Points with reprojection error
-        above this in pixel space are treated as outliers.
+        RANSAC reprojection threshold in pixels (default 3.0 px).
     """
 
     def __init__(
@@ -358,17 +464,7 @@ class HomographyCalibrator:
         pitch_y: float,
         label: Optional[str] = None,
     ) -> None:
-        """Add an image↔pitch correspondence.
-
-        Parameters
-        ----------
-        pixel_x, pixel_y:
-            Image-space pixel coordinates of the landmark.
-        pitch_x, pitch_y:
-            Metric pitch coordinates (meters) in the 105×68 coordinate system.
-        label:
-            Optional human-readable name for the landmark.
-        """
+        """Add an image pixel ↔ metric pitch coordinate correspondence."""
         self._correspondences.append(
             LandmarkCorrespondence(
                 pixel_x=float(pixel_x),
@@ -389,21 +485,20 @@ class HomographyCalibrator:
         return list(self._correspondences)
 
     def estimate(self) -> CalibrationResult:
-        """Estimate the homography from stored correspondences.
+        """Estimate homography matrix from correspondences using RANSAC.
 
-        Uses OpenCV RANSAC (``cv2.RANSAC``) to robustly reject outlier
-        correspondences.  A DLT refinement is performed over inliers.
-
-        Returns
-        -------
-        CalibrationResult
-            Inspect ``is_valid``, ``warnings``, and ``rms_reprojection_px``.
+        Computes:
+        - Inlier and overall image-space reprojection errors (pixels).
+        - Inlier and overall forward-projection errors (metres).
+        - Pitch coverage score and regional span analysis.
+        - Calibrated pitch bounding box (with min and max X and Y bounds).
+        - Conservative calibration scope classification.
+        - Comprehensive reliability warnings.
         """
         n = len(self._correspondences)
         warnings: List[str] = []
 
         if n < MIN_CORRESPONDENCES:
-            # Cannot even attempt estimation
             dummy_H = np.eye(3, dtype=np.float64)
             result = CalibrationResult(
                 H=dummy_H,
@@ -412,15 +507,20 @@ class HomographyCalibrator:
                 rms_reprojection_px=float("inf"),
                 max_reprojection_px=float("inf"),
                 rms_reprojection_m=float("inf"),
+                max_reprojection_m=float("inf"),
+                overall_rms_reprojection_px=float("inf"),
+                overall_rms_reprojection_m=float("inf"),
                 per_point_errors_px=[],
+                per_point_errors_m=[],
                 inlier_mask=[],
                 coverage_score=0.0,
                 quadrant_coverage={
-                    "left_third": False, "middle_third": False, "right_third": False
+                    "left_third": False, "middle_third": False, "right_third": False,
+                    "near_half": False, "far_half": False,
                 },
+                calibrated_zone_m={"x_range": [0.0, 0.0], "y_range": [0.0, 0.0]},
                 warnings=[
-                    f"Insufficient correspondences: {n} provided, "
-                    f"minimum required is {MIN_CORRESPONDENCES}."
+                    f"Insufficient correspondences: {n} provided, minimum required is {MIN_CORRESPONDENCES}."
                 ],
                 calibration_scope="penalty_box_region",
                 is_valid=False,
@@ -443,7 +543,7 @@ class HomographyCalibrator:
         if H_raw is None or mask is None:
             warnings.append(
                 "cv2.findHomography returned None — correspondences may be degenerate "
-                "(collinear, duplicated, or numerically unstable)."
+                "(collinear, duplicate pixels, or numerically unstable)."
             )
             dummy_H = np.eye(3, dtype=np.float64)
             result = CalibrationResult(
@@ -453,12 +553,18 @@ class HomographyCalibrator:
                 rms_reprojection_px=float("inf"),
                 max_reprojection_px=float("inf"),
                 rms_reprojection_m=float("inf"),
+                max_reprojection_m=float("inf"),
+                overall_rms_reprojection_px=float("inf"),
+                overall_rms_reprojection_m=float("inf"),
                 per_point_errors_px=[float("inf")] * n,
+                per_point_errors_m=[float("inf")] * n,
                 inlier_mask=[False] * n,
                 coverage_score=0.0,
                 quadrant_coverage={
-                    "left_third": False, "middle_third": False, "right_third": False
+                    "left_third": False, "middle_third": False, "right_third": False,
+                    "near_half": False, "far_half": False,
                 },
+                calibrated_zone_m={"x_range": [0.0, 0.0], "y_range": [0.0, 0.0]},
                 warnings=warnings,
                 calibration_scope="penalty_box_region",
                 is_valid=False,
@@ -470,7 +576,7 @@ class HomographyCalibrator:
         inlier_count = sum(inlier_mask)
         H = H_raw.astype(np.float64)
 
-        # --- Validate H is finite and non-degenerate ---
+        # Validate non-degeneracy
         is_valid = True
         if not np.all(np.isfinite(H)):
             warnings.append("Estimated homography contains non-finite values (NaN or Inf).")
@@ -485,7 +591,6 @@ class HomographyCalibrator:
             is_valid = False
 
         if is_valid:
-            # Check that the pitch corners back-project to plausible pixel coordinates
             pitch_corners = np.array(
                 [[0, 0], [self.pitch_length, 0],
                  [self.pitch_length, self.pitch_width], [0, self.pitch_width]],
@@ -499,92 +604,155 @@ class HomographyCalibrator:
                 if np.any(np.abs(scales) < 1e-7) or not np.all(np.isfinite(back)):
                     warnings.append(
                         "Pitch corners back-project to degenerate pixel positions. "
-                        "Check landmark selection and coordinate convention."
+                        "Check landmark selection and coordinate conventions."
                     )
                     is_valid = False
                 else:
                     pix_back = back[:, :2] / scales[:, None]
-                    # Sanity: all corners should land at positive pixel coordinates
-                    if np.any(pix_back < -500) or np.any(pix_back > 1e5):
+                    if np.any(pix_back < -2000) or np.any(pix_back > 1e5):
                         warnings.append(
-                            "Pitch corner back-projections are implausibly large or negative. "
-                            "Verify coordinate convention and landmark accuracy."
+                            "Pitch corner back-projections are implausibly outside image boundaries. "
+                            "Verify landmark pixel accuracy."
                         )
             except np.linalg.LinAlgError:
                 warnings.append("Could not invert homography matrix for validation.")
                 is_valid = False
 
-        # --- Reprojection errors ---
-        per_pt_errors, rms_px, max_px = _compute_reprojection_errors_px(H, self._correspondences)
-        rms_reprojection_m = 0.0
-        if rms_px < float("inf"):
-            # Also report pitch-space error for intuitive understanding
-            # (forward-projected errors at the calibration landmarks)
-            pitch_errs = []
-            for c in self._correspondences:
-                vec = np.array([c.pixel_x, c.pixel_y, 1.0], dtype=np.float64)
-                proj = H @ vec
-                if abs(proj[2]) > 1e-9:
-                    px_proj = proj[0] / proj[2]
-                    py_proj = proj[1] / proj[2]
-                    err_m = math.sqrt((px_proj - c.pitch_x) ** 2 + (py_proj - c.pitch_y) ** 2)
-                    pitch_errs.append(err_m)
-            if pitch_errs:
-                rms_reprojection_m = math.sqrt(
-                    sum(e ** 2 for e in pitch_errs) / len(pitch_errs)
-                )
+        # Compute per-point errors
+        per_pt_errors_px, overall_rms_px, overall_max_px = _compute_reprojection_errors_px(
+            H, self._correspondences
+        )
+        per_pt_errors_m, overall_rms_m, overall_max_m = _compute_forward_errors_m(
+            H, self._correspondences
+        )
 
-        if rms_px > 5.0:
-            warnings.append(
-                f"High RMS reprojection error: {rms_px:.2f} px. "
-                "Consider verifying landmark positions or adding more distributed points."
-            )
+        # Inlier-only error metrics
+        inlier_errors_px = [
+            e for e, ok in zip(per_pt_errors_px, inlier_mask)
+            if ok and math.isfinite(e)
+        ]
+        inlier_errors_m = [
+            e for e, ok in zip(per_pt_errors_m, inlier_mask)
+            if ok and math.isfinite(e)
+        ]
 
-        # --- Coverage ---
+        if inlier_errors_px:
+            inlier_rms_px = math.sqrt(sum(e ** 2 for e in inlier_errors_px) / len(inlier_errors_px))
+            inlier_max_px = max(inlier_errors_px)
+        else:
+            inlier_rms_px = float("inf")
+            inlier_max_px = float("inf")
+
+        if inlier_errors_m:
+            inlier_rms_m = math.sqrt(sum(e ** 2 for e in inlier_errors_m) / len(inlier_errors_m))
+            inlier_max_m = max(inlier_errors_m)
+        else:
+            inlier_rms_m = float("inf")
+            inlier_max_m = float("inf")
+
+        # Spatial coverage calculation
         inlier_pitch_pts = [
             (self._correspondences[i].pitch_x, self._correspondences[i].pitch_y)
             for i, ok in enumerate(inlier_mask)
             if ok
         ]
-        coverage_score, quadrant_coverage = _compute_coverage(
+        coverage_score, quadrant_coverage, spans = _compute_coverage(
             inlier_pitch_pts, self.pitch_length, self.pitch_width
         )
 
-        if n < RECOMMENDED_CORRESPONDENCES:
+        # Compute calibrated zone bounds with documented 5.0m margin
+        margin_m = 5.0
+        if inlier_pitch_pts:
+            cal_x_min = max(0.0, spans["x_min"] - margin_m)
+            cal_x_max = min(self.pitch_length, spans["x_max"] + margin_m)
+            cal_y_min = max(0.0, spans["y_min"] - margin_m)
+            cal_y_max = min(self.pitch_width, spans["y_max"] + margin_m)
+        else:
+            cal_x_min, cal_x_max = 0.0, 16.5
+            cal_y_min, cal_y_max = 13.84, 54.16
+
+        # Classify scope
+        calibration_scope = _classify_scope(
+            coverage_score=coverage_score,
+            quadrant_coverage=quadrant_coverage,
+            spans=spans,
+            n_inliers=inlier_count,
+            inlier_rms_px=inlier_rms_px,
+            pitch_length=self.pitch_length,
+            pitch_width=self.pitch_width,
+        )
+
+        if calibration_scope == "full_pitch":
+            cal_x_min = 0.0
+            cal_x_max = self.pitch_length
+            cal_y_min = 0.0
+            cal_y_max = self.pitch_width
+
+        calibrated_zone_m = {
+            "x_range": [round(cal_x_min, 2), round(cal_x_max, 2)],
+            "y_range": [round(cal_y_min, 2), round(cal_y_max, 2)],
+        }
+
+        # Build informative, honest warnings
+        if inlier_rms_px > 3.0:
             warnings.append(
-                f"Only {n} correspondences provided. "
-                f"≥ {RECOMMENDED_CORRESPONDENCES} well-distributed correspondences "
-                "are recommended for reliable full-pitch coverage."
-            )
-        if inlier_count < MIN_CORRESPONDENCES:
-            warnings.append(
-                f"Only {inlier_count} RANSAC inliers from {n} correspondences. "
-                "Calibration quality may be low."
-            )
-        if not quadrant_coverage.get("middle_third", False):
-            warnings.append(
-                "No inlier points in the middle third of the pitch. "
-                "Projection accuracy near midfield is not validated."
-            )
-        if not quadrant_coverage.get("right_third", False):
-            warnings.append(
-                "No inlier points in the right third of the pitch. "
-                "Projection accuracy in this region is extrapolated."
+                f"Elevated inlier RMS reprojection error: {inlier_rms_px:.2f} px "
+                f"({inlier_rms_m:.2f} m). Check landmark accuracy."
             )
 
-        calibration_scope = _classify_scope(coverage_score, quadrant_coverage, inlier_count)
+        if calibration_scope == "full_pitch":
+            warnings.append(
+                "Geometric landmark coverage does not guarantee real-world projection accuracy across "
+                "the entire pitch. Extrapolation between sparse landmarks, lens distortion, rolling shutter, "
+                "and camera elevation can introduce significant local metric distortion. "
+                "Independent pitch-landmark validation is strongly recommended."
+            )
+        else:
+            warnings.append(
+                f"Calibration is partial (calibrated zone X: [{cal_x_min:.1f}, {cal_x_max:.1f}] m, "
+                f"Y: [{cal_y_min:.1f}, {cal_y_max:.1f}] m). Projections outside this zone suffer from planar "
+                "extrapolation divergence and should not be treated as reliable metric coordinates."
+            )
+
+        if n < RECOMMENDED_CORRESPONDENCES:
+            warnings.append(
+                f"Only {n} correspondences provided. >= {RECOMMENDED_CORRESPONDENCES} well-distributed "
+                "correspondences across both touchlines and both halves are required for full-pitch validation."
+            )
+
+        if inlier_count < MIN_CORRESPONDENCES:
+            warnings.append(
+                f"Only {inlier_count} RANSAC inliers from {n} correspondences. Calibration quality is unreliable."
+            )
+
+        if not quadrant_coverage.get("middle_third", False):
+            warnings.append("No inlier landmarks in the middle third of the pitch; midfield accuracy is unvalidated.")
+
+        if not quadrant_coverage.get("right_third", False):
+            warnings.append("No inlier landmarks in the right third of the pitch; far-half accuracy is extrapolated.")
+
+        if spans["y_span"] < (0.60 * self.pitch_width):
+            warnings.append(
+                f"Narrow pitch width span ({spans['y_span']:.1f} m < {0.60 * self.pitch_width:.1f} m); "
+                "touchline projection accuracy is unconstrained."
+            )
 
         result = CalibrationResult(
             H=H,
             inlier_count=inlier_count,
             total_correspondences=n,
-            rms_reprojection_px=rms_px,
-            max_reprojection_px=max_px,
-            rms_reprojection_m=rms_reprojection_m,
-            per_point_errors_px=per_pt_errors,
+            rms_reprojection_px=inlier_rms_px,
+            max_reprojection_px=inlier_max_px,
+            rms_reprojection_m=inlier_rms_m,
+            max_reprojection_m=inlier_max_m,
+            overall_rms_reprojection_px=overall_rms_px,
+            overall_rms_reprojection_m=overall_rms_m,
+            per_point_errors_px=per_pt_errors_px,
+            per_point_errors_m=per_pt_errors_m,
             inlier_mask=inlier_mask,
             coverage_score=coverage_score,
             quadrant_coverage=quadrant_coverage,
+            calibrated_zone_m=calibrated_zone_m,
             warnings=warnings,
             calibration_scope=calibration_scope,
             is_valid=is_valid,
@@ -597,27 +765,9 @@ class HomographyCalibrator:
         path: str | Path,
         extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> Path:
-        """Save calibration to a metadata-rich JSON file.
-
-        The JSON contains both the 3×3 homography matrix (key ``"H"``) and
-        validation/coverage metadata so that ``PitchHomography`` can distinguish
-        between the legacy format (bare matrix) and the rich format.
-
-        Parameters
-        ----------
-        path:
-            Output file path.
-        extra_metadata:
-            Additional key/value pairs to merge into the metadata block.
-
-        Returns
-        -------
-        Path to the saved file.
-        """
+        """Save calibration to a rich, self-documenting JSON file."""
         if self._last_result is None:
-            raise RuntimeError(
-                "Call estimate() before save(). No calibration result available."
-            )
+            raise RuntimeError("Call estimate() before save(). No calibration result available.")
 
         result = self._last_result
         corr_list = [
@@ -638,16 +788,16 @@ class HomographyCalibrator:
             "pitch_width_m": self.pitch_width,
             "calibration_scope": result.calibration_scope,
             "full_pitch_calibration": result.calibration_scope == "full_pitch",
+            "calibrated_zone_m": result.calibrated_zone_m,
             "correspondences": corr_list,
             "validation": result.to_dict(),
             "coordinate_convention": (
-                "Origin (0,0) at left goal-line/near touchline intersection. "
+                "Origin (0,0) at left goal-line / near touchline intersection. "
                 "X axis along pitch length (0→105 m), Y axis along pitch width (0→68 m)."
             ),
-            "camera_motion_warning": (
-                "This homography assumes a static camera and flat pitch plane. "
-                "Camera pan, tilt, zoom, or cuts will introduce errors not captured "
-                "by this calibration."
+            "camera_motion_limitation": (
+                "This homography assumes a static camera and a planar pitch. Camera panning, "
+                "tilting, zooming, or broadcast shot cuts invalidate this matrix and require recalibration."
             ),
         }
         if extra_metadata:
@@ -662,19 +812,13 @@ class HomographyCalibrator:
 
     @classmethod
     def load(cls, path: str | Path) -> "HomographyCalibrator":
-        """Restore a calibrator from a previously saved rich JSON file.
-
-        Note: the loaded calibrator's ``_last_result`` is a reconstructed
-        ``CalibrationResult`` populated from the saved metadata.  Correspondences
-        are also restored so the user can add more points and re-estimate.
-        """
+        """Restore calibrator and correspondence data from a saved rich JSON file."""
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         if "format" not in data or data["format"] != "courtvision_homography_v1":
             raise ValueError(
-                f"File at {path} does not appear to be a courtvision_homography_v1 file. "
-                "Use PitchHomography for the legacy matrix-only format."
+                f"File at {path} is not a valid courtvision_homography_v1 file."
             )
 
         cal = cls(
@@ -691,7 +835,6 @@ class HomographyCalibrator:
                 label=c.get("label"),
             )
 
-        # Reconstruct last result from saved validation block
         H = np.array(data["H"], dtype=np.float64)
         v = data.get("validation", {})
         cal._last_result = CalibrationResult(
@@ -701,12 +844,17 @@ class HomographyCalibrator:
             rms_reprojection_px=v.get("rms_reprojection_px", float("inf")),
             max_reprojection_px=v.get("max_reprojection_px", float("inf")),
             rms_reprojection_m=v.get("rms_reprojection_m", float("inf")),
+            max_reprojection_m=v.get("max_reprojection_m", float("inf")),
+            overall_rms_reprojection_px=v.get("overall_rms_reprojection_px", float("inf")),
+            overall_rms_reprojection_m=v.get("overall_rms_reprojection_m", float("inf")),
             per_point_errors_px=v.get("per_point_errors_px", []),
+            per_point_errors_m=v.get("per_point_errors_m", []),
             inlier_mask=v.get("inlier_mask", []),
             coverage_score=v.get("coverage_score", 0.0),
             quadrant_coverage=v.get("quadrant_coverage", {}),
+            calibrated_zone_m=data.get("calibrated_zone_m") or v.get("calibrated_zone_m", {"x_range": [0.0, 0.0], "y_range": [0.0, 0.0]}),
             warnings=v.get("warnings", []),
-            calibration_scope=v.get("calibration_scope", "partial"),
+            calibration_scope=data.get("calibration_scope", v.get("calibration_scope", "partial")),
             is_valid=v.get("is_valid", False),
         )
         return cal

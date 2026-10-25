@@ -5,7 +5,7 @@ Project 2D camera pixel coordinates (u, v) into 2D metric pitch coordinates (X, 
 
 Coordinate convention (105 m × 68 m FIFA pitch)
 ------------------------------------------------
-Origin (0, 0) at the left goal-line / near touchline intersection.
+Origin (0, 0) at the left goal-line / near touchline intersection:
   X axis  — along pitch length, 0 → 105 m (left goal → right goal)
   Y axis  — along pitch width,  0 → 68 m  (near touchline → far touchline)
 
@@ -14,21 +14,21 @@ Loading formats
 ``PitchHomography`` transparently loads two JSON formats:
 
 1. **Legacy (bare matrix)**: a JSON array-of-arrays ``[[...],[...],[...]]``.
-   Treated as a penalty-box calibration.  calibrated_zone defaults to the
-   18-yard box bounds.
+   Treated as an 18-yard penalty box calibration.  Calibrated zone defaults to
+   X in [0.0, 16.5] m, Y in [13.84, 54.16] m.
 
 2. **Rich (v1)**: written by ``HomographyCalibrator.save()``.  Contains key
    ``"format": "courtvision_homography_v1"`` along with the matrix under ``"H"``,
-   calibration scope, coverage metrics, and landmark correspondences.  The
-   ``calibrated_zone`` is derived from inlier landmark coverage; for full-pitch
-   calibrations the entire pitch is considered the calibrated zone.
+   calibration scope, coverage metrics, and documented calibrated zone bounds.
+   Both minimum and maximum X and Y boundaries are tracked and enforced.
+   For validated full-pitch calibrations, the entire pitch is the calibrated zone.
 
 Limitations
 -----------
-A single static homography assumes a flat pitch and a static camera.  Camera pan,
-tilt, zoom, or cuts will introduce errors not captured here.  Use
-``in_calibrated_zone`` to flag observations that are outside the region
-validated during calibration.
+A single static homography assumes a flat pitch plane and a stationary camera.
+Camera panning, tilting, zooming, or shot cuts induce perspective divergence
+not captured by this calibration. Points outside the calibrated zone are flagged
+by ``is_within_calibrated_zone()`` and should be excluded from physical metrics.
 """
 
 import json
@@ -52,10 +52,9 @@ class PitchHomography:
     pitch_width:
         Pitch width in meters (default 68.0).
     box_depth:
-        Depth of the penalty box (default 16.5 m, used for legacy mode
-        ``is_within_calibrated_zone``).
+        Depth of penalty box (default 16.5 m, used for legacy calibrated zone).
     box_y_min, box_y_max:
-        Width extents of the penalty box for legacy calibrated-zone checks.
+        Width extents of the penalty box for legacy calibrated zone.
     """
 
     def __init__(
@@ -69,11 +68,19 @@ class PitchHomography:
     ) -> None:
         self.pitch_length = float(pitch_length)
         self.pitch_width = float(pitch_width)
-        self.box_depth = float(box_depth)
-        self.box_y_min = float(box_y_min)
-        self.box_y_max = float(box_y_max)
 
-        # Populated during loading; override defaults for rich calibrations.
+        # Calibrated region bounds (minimum and maximum in both axes)
+        self.calibrated_x_min: float = 0.0
+        self.calibrated_x_max: float = float(box_depth)
+        self.calibrated_y_min: float = float(box_y_min)
+        self.calibrated_y_max: float = float(box_y_max)
+
+        # Legacy attributes maintained for backward compatibility
+        self.box_depth: float = float(box_depth)
+        self.box_y_min: float = float(box_y_min)
+        self.box_y_max: float = float(box_y_max)
+
+        # Metadata attributes
         self._calibration_metadata: Dict[str, Any] = {}
         self._is_full_pitch: bool = False
         self._calibration_scope: str = "penalty_box_region"
@@ -105,14 +112,14 @@ class PitchHomography:
 
     @staticmethod
     def _load_json(path: Path) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
-        """Load from a JSON file.  Returns (H, rich_metadata_dict_or_None)."""
+        """Load from a JSON file. Returns (H, rich_metadata_dict_or_None)."""
         if not path.exists():
             raise FileNotFoundError(f"Homography file not found at: {path}")
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         if isinstance(data, list):
-            # Legacy format: bare matrix
+            # Legacy format: bare matrix array
             return np.array(data, dtype=np.float64), None
 
         if isinstance(data, dict):
@@ -120,7 +127,6 @@ class PitchHomography:
             if fmt == "courtvision_homography_v1":
                 H = np.array(data["H"], dtype=np.float64)
                 return H, data
-            # Unknown dict format — try the "H" key, then fall back
             if "H" in data:
                 return np.array(data["H"], dtype=np.float64), None
             raise ValueError(
@@ -131,11 +137,13 @@ class PitchHomography:
         raise ValueError(f"Unexpected JSON content in {path}: {type(data)}")
 
     def _apply_rich_metadata(self, meta: Dict[str, Any]) -> None:
-        """Configure calibrated-zone bounds from a rich calibration JSON."""
+        """Apply bounds, scope, and validation details from rich calibration JSON."""
         self._calibration_metadata = meta
         self._is_full_pitch = bool(meta.get("full_pitch_calibration", False))
         self._calibration_scope = meta.get("calibration_scope", "partial")
-        self._camera_motion_warning = meta.get("camera_motion_warning", "")
+        self._camera_motion_warning = meta.get(
+            "camera_motion_limitation", meta.get("camera_motion_warning", "")
+        )
         self._correspondences = meta.get("correspondences", [])
 
         v = meta.get("validation", {})
@@ -143,37 +151,48 @@ class PitchHomography:
         self._coverage_score = float(v.get("coverage_score", 0.0))
 
         if self._is_full_pitch:
-            # For a validated full-pitch calibration the entire pitch is
-            # the calibrated zone.
-            self.box_depth = self.pitch_length
-            self.box_y_min = 0.0
-            self.box_y_max = self.pitch_width
+            self.calibrated_x_min = 0.0
+            self.calibrated_x_max = self.pitch_length
+            self.calibrated_y_min = 0.0
+            self.calibrated_y_max = self.pitch_width
         else:
-            # Use inlier landmark bounding box as calibrated zone, with 5 m margin.
-            pitch_pts = [
-                (c["pitch_x"], c["pitch_y"])
-                for c in self._correspondences
-                if not (inlier_ok := True)  # include all saved correspondences
-            ]
-            inlier_mask = v.get("inlier_mask", [])
-            pitch_pts = [
-                (c["pitch_x"], c["pitch_y"])
-                for c, ok in zip(self._correspondences, inlier_mask)
-                if ok
-            ]
-            if pitch_pts:
-                xs = [p[0] for p in pitch_pts]
-                ys = [p[1] for p in pitch_pts]
-                # Calibrated zone = inlier landmark bounding box + 5 m margin,
-                # clipped to pitch boundaries.
-                margin = 5.0
-                self.box_depth = min(max(xs) + margin, self.pitch_length)
-                self.box_y_min = max(min(ys) - margin, 0.0)
-                self.box_y_max = min(max(ys) + margin, self.pitch_width)
-            # else: keep the constructor defaults (penalty-box region)
+            # Check for explicitly saved calibrated_zone_m
+            zone = meta.get("calibrated_zone_m") or v.get("calibrated_zone_m")
+            if zone and "x_range" in zone and "y_range" in zone:
+                xr = zone["x_range"]
+                yr = zone["y_range"]
+                self.calibrated_x_min = float(xr[0])
+                self.calibrated_x_max = float(xr[1])
+                self.calibrated_y_min = float(yr[0])
+                self.calibrated_y_max = float(yr[1])
+            else:
+                # Derive from inlier landmarks with 5.0m margin
+                inlier_mask = v.get("inlier_mask", [])
+                pitch_pts = [
+                    (c["pitch_x"], c["pitch_y"])
+                    for c, ok in zip(self._correspondences, inlier_mask)
+                    if ok
+                ]
+                if not pitch_pts:
+                    pitch_pts = [
+                        (c["pitch_x"], c["pitch_y"]) for c in self._correspondences
+                    ]
+                if pitch_pts:
+                    xs = [p[0] for p in pitch_pts]
+                    ys = [p[1] for p in pitch_pts]
+                    margin = 5.0
+                    self.calibrated_x_min = max(0.0, min(xs) - margin)
+                    self.calibrated_x_max = min(self.pitch_length, max(xs) + margin)
+                    self.calibrated_y_min = max(0.0, min(ys) - margin)
+                    self.calibrated_y_max = min(self.pitch_width, max(ys) + margin)
+
+        # Sync legacy attributes
+        self.box_depth = self.calibrated_x_max
+        self.box_y_min = self.calibrated_y_min
+        self.box_y_max = self.calibrated_y_max
 
     # ------------------------------------------------------------------
-    # Public projection API  (unchanged signatures)
+    # Public projection API
     # ------------------------------------------------------------------
 
     def project_point(
@@ -182,13 +201,11 @@ class PitchHomography:
         pixel_y: float,
         margin_meters: float = 0.0,
     ) -> Tuple[float, float, bool]:
-        """Transform a single pixel point to metric pitch coordinates.
+        """Transform a single pixel coordinate to metric pitch coordinates.
 
         Returns
         -------
         (pitch_x, pitch_y, is_valid_pitch)
-        ``is_valid_pitch`` is True when the projected point lies within the
-        105 m × 68 m pitch boundary (plus optional margin).
         """
         vec = np.array([pixel_x, pixel_y, 1.0], dtype=np.float64)
         proj = self.H @ vec
@@ -210,7 +227,7 @@ class PitchHomography:
         y2: float,
         margin_meters: float = 0.0,
     ) -> Tuple[float, float, float, float, bool, bool]:
-        """Extract bottom-center foot anchor and project to pitch coordinates.
+        """Extract bottom-center foot contact anchor and project to pitch coordinates.
 
         Returns
         -------
@@ -241,28 +258,27 @@ class PitchHomography:
         pitch_y: float,
         margin_meters: float = 5.0,
     ) -> bool:
-        """True when the projected point is within the calibrated region.
+        """Check if pitch coordinate lies within the calibrated region.
 
-        For legacy penalty-box calibrations this checks proximity to the 18-yard box.
-        For rich calibrations derived from landmark coverage this checks proximity
-        to the inlier bounding box.  For validated full-pitch calibrations the
-        entire pitch is considered calibrated (margin applies to pitch edges).
+        Tracks and enforces both minimum and maximum bounds in X and Y:
+            [calibrated_x_min - margin_meters, calibrated_x_max + margin_meters] x
+            [calibrated_y_min - margin_meters, calibrated_y_max + margin_meters]
+
+        For partial calibrations on either end of the pitch (e.g. left or right penalty
+        box), both minimum and maximum bounds ensure uncalibrated opposite ends or
+        midfield are rejected.
         """
         if np.isnan(pitch_x) or np.isnan(pitch_y):
             return False
-        x_ok = -margin_meters <= pitch_x <= (self.box_depth + margin_meters)
-        y_ok = (self.box_y_min - margin_meters) <= pitch_y <= (self.box_y_max + margin_meters)
+        x_ok = (self.calibrated_x_min - margin_meters) <= pitch_x <= (self.calibrated_x_max + margin_meters)
+        y_ok = (self.calibrated_y_min - margin_meters) <= pitch_y <= (self.calibrated_y_max + margin_meters)
         return bool(x_ok and y_ok)
 
     def project_points(
         self,
         points: np.ndarray,
     ) -> np.ndarray:
-        """Batch project an array of shape (N, 2) to (N, 2).
-
-        Points with a near-zero perspective scale (degenerate projections)
-        are set to NaN.
-        """
+        """Batch project an array of shape (N, 2) to (N, 2)."""
         if points.ndim != 2 or points.shape[1] != 2:
             raise ValueError(f"Expected points array of shape (N, 2), got {points.shape}")
 
@@ -283,21 +299,16 @@ class PitchHomography:
     # ------------------------------------------------------------------
 
     def get_metadata(self) -> Dict[str, Any]:
-        """Return metadata describing calibration scope and limitations.
-
-        For rich calibrations this includes validation metrics and per-quadrant
-        coverage.  For legacy calibrations a minimal summary is returned.
-        """
-        if self._calibration_scope != "penalty_box_region" and self._calibration_metadata:
-            # Rich calibration: return saved metadata summary
+        """Return standardized homography metadata describing scope and limitations."""
+        if self._calibration_metadata:
             meta: Dict[str, Any] = {
                 "source": self.source_path,
                 "calibration_scope": self._calibration_scope,
                 "full_pitch_calibration": self._is_full_pitch,
                 "pitch_dimensions_m": [self.pitch_length, self.pitch_width],
                 "calibrated_zone_m": {
-                    "x_range": [0.0, self.box_depth],
-                    "y_range": [self.box_y_min, self.box_y_max],
+                    "x_range": [self.calibrated_x_min, self.calibrated_x_max],
+                    "y_range": [self.calibrated_y_min, self.calibrated_y_max],
                 },
                 "coverage_score": self._coverage_score,
                 "validation": self._validation,
@@ -306,18 +317,17 @@ class PitchHomography:
                 meta["camera_motion_warning"] = self._camera_motion_warning
             return meta
 
-        # Legacy / default metadata
         return {
             "source": self.source_path,
             "calibration_scope": "penalty_box_region",
             "full_pitch_calibration": False,
             "pitch_dimensions_m": [self.pitch_length, self.pitch_width],
             "calibrated_zone_m": {
-                "x_range": [0.0, self.box_depth],
-                "y_range": [self.box_y_min, self.box_y_max],
+                "x_range": [self.calibrated_x_min, self.calibrated_x_max],
+                "y_range": [self.calibrated_y_min, self.calibrated_y_max],
             },
             "warning": (
-                "H is calibrated solely from 4 points of the 18-yard penalty box. "
+                "H is calibrated solely from the 18-yard penalty box. "
                 "Points outside the penalty-box region suffer from perspective divergence "
                 "and must not be treated as trustworthy full-pitch coordinates."
             ),
