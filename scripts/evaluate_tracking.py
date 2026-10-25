@@ -519,6 +519,7 @@ def main() -> None:
                 cluster_iou=args.cluster_iou,
                 momentum_window=args.momentum_window,
                 speed_gate=args.speed_gate,
+                enable_camera_motion=args.camera_motion,
             )
 
             print(f"Running {tracker_display_name} on {seq} ({vid_path})...")
@@ -768,6 +769,7 @@ def main() -> None:
             "max_implied_speed_px_per_frame": args.speed_gate,
             "export_ghosts": args.export_ghosts,
             "trail_length": args.trail_length,
+            "enable_camera_motion": args.camera_motion,
         }
         if args.tracker == "kmt"
         else {
