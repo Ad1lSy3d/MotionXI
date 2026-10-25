@@ -12,6 +12,7 @@ from scipy.optimize import linear_sum_assignment
 
 from courtvision.detection.detector import Detection
 from courtvision.projection.homography import PitchHomography
+from courtvision.tracking.camera_motion import CameraMotionCompensator
 from courtvision.tracking.track_types import TrackState, TrackedPlayer
 
 
@@ -64,6 +65,7 @@ class KinematicMemoryTracker:
         min_ghost_frames: int = 6,
         max_ghost_frames: int = 25,
         max_implied_speed_px_per_frame: float = 120.0,
+        enable_camera_motion: bool = False,
     ) -> None:
         if trail_length < 1:
             raise ValueError("trail_length must be at least 1")
@@ -83,6 +85,8 @@ class KinematicMemoryTracker:
         self.min_ghost_frames = min_ghost_frames
         self.max_ghost_frames = max_ghost_frames
         self.max_implied_speed_px_per_frame = max_implied_speed_px_per_frame
+        self.enable_camera_motion = enable_camera_motion
+        self.cmc = CameraMotionCompensator() if enable_camera_motion else None
 
         self.tracks: Dict[int, KinematicTrack] = {}
         self.next_track_id = 1
@@ -346,12 +350,29 @@ class KinematicMemoryTracker:
         detections: List[DetectionLike],
         frame_idx: int,
         fps: float = 30.0,
+        frame: Optional[np.ndarray] = None,
     ) -> Tuple[List[TrackedPlayer], float]:
         """Update tracks and return track records plus association time in milliseconds."""
         if frame_idx < 0:
             raise ValueError("frame_idx must be non-negative")
         normalized = [self._read_detection(detection) for detection in detections]
         start_time = time.perf_counter()
+
+        # Frame-to-frame camera motion compensation
+        if self.enable_camera_motion and self.cmc is not None and frame is not None:
+            M = self.cmc.estimate_motion(frame)
+            if M is not None:
+                for track in self.tracks.values():
+                    track.bbox = CameraMotionCompensator.transform_bbox(track.bbox, M)
+                    track.foot_x, track.foot_y = CameraMotionCompensator.transform_point(
+                        track.foot_x, track.foot_y, M
+                    )
+                    track.velocity = CameraMotionCompensator.transform_velocity(
+                        track.velocity[0], track.velocity[1], M
+                    )
+                    track.cached_velocity = CameraMotionCompensator.transform_velocity(
+                        track.cached_velocity[0], track.cached_velocity[1], M
+                    )
 
         expired_ids = [
             track_id
@@ -481,7 +502,7 @@ class KinematicMemoryTracker:
         else:
             avg_active = median_active = 0.0
             max_active = 0
-        return {
+        stats: Dict[str, Any] = {
             "total_unique_track_ids": len(summaries),
             "average_track_length_frames": round(avg_len, 2),
             "median_track_length_frames": round(median_len, 2),
@@ -491,9 +512,12 @@ class KinematicMemoryTracker:
             "median_active_tracks_per_frame": round(median_active, 2),
             "maximum_active_tracks_per_frame": max_active,
         }
+        if self.cmc is not None:
+            stats["camera_motion_compensation"] = self.cmc.get_statistics()
+        return stats
 
     def get_config(self) -> Dict[str, Any]:
-        return {
+        cfg: Dict[str, Any] = {
             "tracker_name": "KinematicMemoryTracker",
             "momentum_window": self.momentum_window,
             "cluster_iou_threshold": self.cluster_iou_threshold,
@@ -501,4 +525,8 @@ class KinematicMemoryTracker:
             "max_ghost_frames": self.max_ghost_frames,
             "max_implied_speed_px_per_frame": self.max_implied_speed_px_per_frame,
             "trail_length": self.trail_length,
+            "enable_camera_motion": self.enable_camera_motion,
         }
+        if self.cmc is not None:
+            cfg["camera_motion_stats"] = self.cmc.get_statistics()
+        return cfg

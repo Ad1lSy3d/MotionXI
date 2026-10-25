@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from courtvision.detection.detector import Detection
@@ -106,3 +107,131 @@ def test_accepts_detection_dictionary_and_preserves_track_id():
 
     assert second[0].track_id == first[0].track_id
     assert second[0].foot_x == pytest.approx(122.0)
+
+
+def _make_textured_frame(shift_x: float = 0.0, shift_y: float = 0.0) -> np.ndarray:
+    """Generate synthetic high-contrast textured frame with non-periodic features and known translation."""
+    import cv2
+
+    rng = np.random.RandomState(42)
+    base = rng.randint(40, 220, (400, 400, 3), dtype=np.uint8)
+    # Add non-periodic distinct geometrical anchors
+    cv2.circle(base, (90, 110), 18, (255, 0, 0), -1)
+    cv2.rectangle(base, (180, 140), (260, 230), (0, 255, 0), -1)
+    cv2.circle(base, (290, 280), 25, (0, 0, 255), -1)
+    cv2.line(base, (50, 320), (350, 320), (255, 255, 0), 4)
+
+    if shift_x == 0.0 and shift_y == 0.0:
+        return base
+    M = np.float32([[1.0, 0.0, shift_x], [0.0, 1.0, shift_y]])
+    return cv2.warpAffine(base, M, (400, 400), borderMode=cv2.BORDER_REFLECT)
+
+
+def test_camera_motion_transform_direction():
+    """Verify that estimated affine transform correctly maps points in the direction of scene motion."""
+    from courtvision.tracking.camera_motion import CameraMotionCompensator
+
+    cmc = CameraMotionCompensator()
+    f0 = _make_textured_frame(shift_x=0.0, shift_y=0.0)
+    f1 = _make_textured_frame(shift_x=15.0, shift_y=-5.0)
+
+    assert cmc.estimate_motion(f0) is None  # Initial frame establishes reference
+    M = cmc.estimate_motion(f1)
+    assert M is not None
+
+    # Translation components should match (+15, -5)
+    assert M[0, 2] == pytest.approx(15.0, abs=1.0)
+    assert M[1, 2] == pytest.approx(-5.0, abs=1.0)
+
+    # Point at (100, 100) should transform to ~(115, 95)
+    pt_x, pt_y = CameraMotionCompensator.transform_point(100.0, 100.0, M)
+    assert pt_x == pytest.approx(115.0, abs=1.0)
+    assert pt_y == pytest.approx(95.0, abs=1.0)
+
+    # Bounding box should shift by the same translation
+    bbox = (100.0, 100.0, 140.0, 200.0)
+    new_bbox = CameraMotionCompensator.transform_bbox(bbox, M)
+    assert new_bbox[0] == pytest.approx(115.0, abs=1.0)
+    assert new_bbox[1] == pytest.approx(95.0, abs=1.0)
+    assert new_bbox[2] == pytest.approx(155.0, abs=1.0)
+    assert new_bbox[3] == pytest.approx(195.0, abs=1.0)
+
+
+def test_point_prediction_under_synthetic_camera_translation():
+    """Verify that KMT predicts track location incorporating camera motion when enabled."""
+    tracker = KinematicMemoryTracker(enable_camera_motion=True)
+
+    f0 = _make_textured_frame(shift_x=0.0, shift_y=0.0)
+    f1 = _make_textured_frame(shift_x=15.0, shift_y=0.0)
+
+    # Frame 0: detection at [100, 100, 140, 200], foot at (120, 200)
+    first_tracks, _ = tracker.update(
+        [{"bbox": [100.0, 100.0, 140.0, 200.0], "confidence": 0.9}],
+        frame_idx=0,
+        frame=f0,
+    )
+    assert len(first_tracks) == 1
+    track_id = first_tracks[0].track_id
+
+    # Frame 1: missing detection (player occluded), camera translated by +15px
+    tracker.update([], frame_idx=1, frame=f1)
+
+    track = tracker.tracks[track_id]
+    # Foot point and bbox should be shifted by camera motion (+15px)
+    assert track.foot_x == pytest.approx(135.0, abs=1.5)
+    assert track.bbox[0] == pytest.approx(115.0, abs=1.5)
+
+
+def test_unreliable_motion_fallback():
+    """Verify that blank/uniform frames or extreme warps trigger safe identity fallback."""
+    import numpy as np
+    from courtvision.tracking.camera_motion import CameraMotionCompensator
+
+    cmc = CameraMotionCompensator(max_translation_px=50.0)
+    # 1. Blank uniform frames (no corners detected)
+    blank0 = np.full((400, 400, 3), 128, dtype=np.uint8)
+    blank1 = np.full((400, 400, 3), 128, dtype=np.uint8)
+    assert cmc.estimate_motion(blank0) is None
+    assert cmc.estimate_motion(blank1) is None
+    stats = cmc.get_statistics()
+    assert stats["failed_frames"] >= 1
+
+    # 2. None frame
+    assert cmc.estimate_motion(None) is None
+
+    # 3. KMT graceful fallback under blank frames
+    tracker = KinematicMemoryTracker(enable_camera_motion=True)
+    first_tracks, _ = tracker.update(
+        [{"bbox": [100.0, 100.0, 140.0, 200.0], "confidence": 0.9}],
+        frame_idx=0,
+        frame=blank0,
+    )
+    track_id = first_tracks[0].track_id
+    tracker.update([], frame_idx=1, frame=blank1)
+    # Track foot_x remains intact at 120.0 (no crash, no wild jumps)
+    assert tracker.tracks[track_id].foot_x == pytest.approx(120.0)
+
+
+def test_unchanged_behavior_when_compensation_disabled():
+    """Verify that when enable_camera_motion=False, behavior is strictly identical to baseline."""
+    tracker_disabled = KinematicMemoryTracker(enable_camera_motion=False)
+    tracker_enabled = KinematicMemoryTracker(enable_camera_motion=True)
+
+    f0 = _make_textured_frame(shift_x=0)
+    f1 = _make_textured_frame(shift_x=25)
+
+    # When enable_camera_motion=False, passing frame does not invoke compensator
+    assert tracker_disabled.cmc is None
+    assert tracker_enabled.cmc is not None
+
+    t0_dis, _ = tracker_disabled.update(
+        [{"bbox": [100.0, 100.0, 140.0, 200.0], "confidence": 0.9}],
+        frame_idx=0,
+        frame=f0,
+    )
+    # Tracker disabled receives f1 but ignores it
+    tracker_disabled.update([], frame_idx=1, frame=f1)
+
+    # Foot position for disabled tracker should not have shifted by 25px
+    assert tracker_disabled.tracks[t0_dis[0].track_id].foot_x == pytest.approx(120.0)
+

@@ -96,6 +96,12 @@ def parse_args() -> argparse.Namespace:
         help="KMT max implied speed in pixels/frame (default: 120.0)",
     )
     parser.add_argument(
+        "--camera-motion",
+        action="store_true",
+        default=False,
+        help="Enable camera motion compensation in KMT (default: False)",
+    )
+    parser.add_argument(
         "--trail-length",
         type=int,
         default=15,
@@ -174,6 +180,7 @@ def create_tracker(
     cluster_iou: float = 0.35,
     momentum_window: int = 10,
     speed_gate: float = 120.0,
+    enable_camera_motion: bool = False,
 ) -> Any:
     """Instantiate either ByteTrack or KMT tracker with specified parameters."""
     if tracker_type == "kmt":
@@ -182,6 +189,7 @@ def create_tracker(
             momentum_window=momentum_window,
             max_implied_speed_px_per_frame=speed_gate,
             trail_length=trail_length,
+            enable_camera_motion=enable_camera_motion,
         )
     return FootballByteTracker(
         track_activation_threshold=track_thresh,
@@ -214,7 +222,10 @@ def run_tracking_on_video(
             break
 
         dets, _ = detector.detect(frame, frame_idx=frame_idx, fps=fps)
-        tracks, _ = tracker.update(dets, frame_idx=frame_idx, fps=fps)
+        if isinstance(tracker, KinematicMemoryTracker):
+            tracks, _ = tracker.update(dets, frame_idx=frame_idx, fps=fps, frame=frame)
+        else:
+            tracks, _ = tracker.update(dets, frame_idx=frame_idx, fps=fps)
 
         for t in tracks:
             # Exclude ghost predictions from official MOT evaluation unless explicitly enabled

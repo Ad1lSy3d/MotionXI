@@ -112,6 +112,12 @@ def parse_args() -> argparse.Namespace:
         help="Tracker implementation to use (default: bytetrack)",
     )
     parser.add_argument(
+        "--camera-motion",
+        action="store_true",
+        default=False,
+        help="Enable affine camera-motion compensation for KMT (default: False)",
+    )
+    parser.add_argument(
         "--no-video",
         action="store_true",
         help="Skip generating annotated video output",
@@ -250,6 +256,7 @@ def main() -> None:
         tracker = KinematicMemoryTracker(
             homography=homography,
             trail_length=args.trail_length,
+            enable_camera_motion=args.camera_motion,
         )
         tracker_name = "KMT"
         annotated_filename = "kmt_annotated.mp4"
@@ -257,7 +264,8 @@ def main() -> None:
             "Tracker:          Kinematic Memory Tracker "
             f"(cluster IoU={tracker.cluster_iou_threshold}, "
             f"ghost={tracker.min_ghost_frames}-{tracker.max_ghost_frames}f, "
-            f"speed gate={tracker.max_implied_speed_px_per_frame}px/frame)"
+            f"speed gate={tracker.max_implied_speed_px_per_frame}px/frame, "
+            f"CMC={args.camera_motion})"
         )
     else:
         tracker = FootballByteTracker(
@@ -326,12 +334,20 @@ def main() -> None:
             )
             detector_times_ms.append(infer_ms)
 
-            # 2. ByteTrack Association
-            tracks, track_ms = tracker.update(
-                detections=detections,
-                frame_idx=frame_idx,
-                fps=metadata.fps,
-            )
+            # 2. Association
+            if isinstance(tracker, KinematicMemoryTracker):
+                tracks, track_ms = tracker.update(
+                    detections=detections,
+                    frame_idx=frame_idx,
+                    fps=metadata.fps,
+                    frame=frame,
+                )
+            else:
+                tracks, track_ms = tracker.update(
+                    detections=detections,
+                    frame_idx=frame_idx,
+                    fps=metadata.fps,
+                )
             tracker_times_ms.append(track_ms)
 
             # 3. Store Track Records
