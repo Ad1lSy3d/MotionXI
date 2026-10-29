@@ -13,6 +13,12 @@ import cv2
 import numpy as np
 import torch
 
+from courtvision.analytics import (
+    compute_player_metrics,
+    generate_all_heatmaps,
+    export_heatmaps_to_directory,
+)
+from courtvision.analytics.metrics import metrics_to_json_list
 from courtvision.detection.detector import PlayerDetector
 from courtvision.projection.homography import PitchHomography
 from courtvision.tracking.bytetrack_tracker import FootballByteTracker
@@ -121,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         "--no-video",
         action="store_true",
         help="Skip generating annotated video output",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Maximum number of frames to process (default: all frames)",
     )
     return parser.parse_args()
 
@@ -301,6 +313,7 @@ def main() -> None:
         raise RuntimeError(f"Failed to open video file: {video_path}")
 
     all_tracks: List[Dict[str, Any]] = []
+    all_tracked_players: List[TrackedPlayer] = []
     crowded_frames: List[Dict[str, Any]] = []
     id_switch_candidates: List[Dict[str, Any]] = []
 
@@ -318,6 +331,10 @@ def main() -> None:
 
     try:
         while True:
+            if args.max_frames is not None and frame_idx >= args.max_frames:
+                print(f"Reached user-specified limit of {args.max_frames} frames.")
+                break
+
             frame_start = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
@@ -352,6 +369,7 @@ def main() -> None:
 
             # 3. Store Track Records
             current_active_ids = set()
+            all_tracked_players.extend(tracks)
             for t in tracks:
                 all_tracks.append(t.to_dict())
                 current_active_ids.add(t.track_id)
@@ -499,7 +517,44 @@ def main() -> None:
             writer.writeheader()
     print(f"Saved ID switch candidates CSV: {id_switch_csv_path}")
 
-    # 13. Compile and Save Tracking Metadata
+    # 13. Physical Metrics & Heatmaps
+    print("\nComputing physical metrics and heatmaps...")
+    metrics_map = compute_player_metrics(all_tracked_players, fps=metadata.fps)
+    metrics_list = metrics_to_json_list(metrics_map)
+
+    physical_metrics_json_path = output_dir / "player_physical_metrics.json"
+    with open(physical_metrics_json_path, "w") as f:
+        json.dump(metrics_list, f, indent=2)
+    print(f"Saved player metrics JSON:      {physical_metrics_json_path}")
+
+    physical_metrics_csv_path = output_dir / "player_physical_metrics.csv"
+    if metrics_list:
+        fieldnames = [
+            "track_id",
+            "distance_km",
+            "avg_speed_kmh",
+            "top_speed_kmh",
+            "sprint_count",
+            "sprint_threshold_kmh",
+            "sprint_min_duration_s",
+            "valid_samples",
+            "total_samples",
+            "coverage_ratio",
+            "occlusion_gaps",
+            "time_span_s",
+        ]
+        with open(physical_metrics_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(metrics_list)
+    print(f"Saved player metrics CSV:       {physical_metrics_csv_path}")
+
+    heatmaps_dir = output_dir / "heatmaps"
+    heatmaps = generate_all_heatmaps(all_tracked_players)
+    heatmap_exports = export_heatmaps_to_directory(heatmaps, heatmaps_dir)
+    print(f"Saved {len(heatmap_exports)} heatmaps to:         {heatmaps_dir}")
+
+    # 14. Compile and Save Tracking Metadata
     track_stats = tracker.get_track_statistics()
     metadata_path = output_dir / "tracking_metadata.json"
 
@@ -525,6 +580,12 @@ def main() -> None:
             "enabled": False,
             "calibration_scope": "none",
             "full_pitch_calibration": False,
+        },
+        "physical_analytics": {
+            "total_tracked_players": len(metrics_map),
+            "players_with_calibrated_metrics": sum(1 for m in metrics_map.values() if m.valid_samples >= 2),
+            "calibrated_zone_covered": homography._is_full_pitch if homography else False,
+            "calibration_scope": homography.get_metadata().get("calibration_scope") if homography else "none",
         },
         "hardware": {
             "device": detector.device,
@@ -559,6 +620,9 @@ def main() -> None:
             "track_summary_csv": str(summary_csv_path),
             "crowded_frames_csv": str(crowded_csv_path),
             "id_switch_candidates_csv": str(id_switch_csv_path),
+            "physical_metrics_csv": str(physical_metrics_csv_path),
+            "physical_metrics_json": str(physical_metrics_json_path),
+            "heatmaps_dir": str(heatmaps_dir),
             "diagnostics_dir": str(diag_dir),
         },
     }
@@ -584,6 +648,14 @@ def main() -> None:
     print(f"Max Active Tracks/Frame:{track_stats['maximum_active_tracks_per_frame']}")
     print(f"Total Track Records:    {len(all_tracks)}")
     print(f"Heuristic IDSw Events:  {len(id_switch_candidates)}")
+    calibrated_players = [m for m in metrics_map.values() if m.valid_samples >= 2]
+    max_dist = max((m.distance_km for m in calibrated_players), default=0.0)
+    top_spd = max((m.top_speed_kmh for m in calibrated_players if m.top_speed_kmh is not None), default=0.0)
+    print("--------------------------------------------------")
+    print(f"Calibrated Tracks:      {len(calibrated_players)}/{len(metrics_map)} in zone")
+    print(f"Max Calibrated Distance:{max_dist:.3f} km ({max_dist * 1000.0:.1f} m)")
+    print(f"Top Calibrated Speed:   {top_spd:.1f} km/h")
+    print(f"Heatmaps Exported:      {len(heatmap_exports)} ({heatmaps_dir})")
     print("--------------------------------------------------")
     print(f"Detector Inference Avg: {avg_infer_ms:.2f} ms/frame")
     print(f"Tracker Association Avg:{avg_track_ms:.2f} ms/frame")

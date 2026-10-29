@@ -65,6 +65,7 @@ class KinematicMemoryTracker:
         min_ghost_frames: int = 6,
         max_ghost_frames: int = 25,
         max_implied_speed_px_per_frame: float = 120.0,
+        min_matching_iou: float = 0.1,
         enable_camera_motion: bool = False,
     ) -> None:
         if trail_length < 1:
@@ -77,6 +78,8 @@ class KinematicMemoryTracker:
             raise ValueError("ghost frame limits must satisfy 1 <= min <= max")
         if max_implied_speed_px_per_frame <= 0:
             raise ValueError("max_implied_speed_px_per_frame must be positive")
+        if not 0.0 <= min_matching_iou <= 1.0:
+            raise ValueError("min_matching_iou must be between 0 and 1")
 
         self.homography = homography
         self.trail_length = trail_length
@@ -85,6 +88,7 @@ class KinematicMemoryTracker:
         self.min_ghost_frames = min_ghost_frames
         self.max_ghost_frames = max_ghost_frames
         self.max_implied_speed_px_per_frame = max_implied_speed_px_per_frame
+        self.min_matching_iou = min_matching_iou
         self.enable_camera_motion = enable_camera_motion
         self.cmc = CameraMotionCompensator() if enable_camera_motion else None
 
@@ -168,8 +172,12 @@ class KinematicMemoryTracker:
         delta = frame_idx - track.motion_anchor_frame
         vx, vy = track.cached_velocity
         ax, ay = track.cached_acceleration
-        shift_x = vx * delta + 0.5 * ax * delta * delta
-        shift_y = vy * delta + 0.5 * ay * delta * delta
+        # Damp noisy acceleration across multi-frame gaps to prevent quadratic runaway divergence
+        decay = 0.5 ** max(0, delta - 1)
+        eff_ax = ax * decay
+        eff_ay = ay * decay
+        shift_x = vx * delta + 0.5 * eff_ax * delta * delta
+        shift_y = vy * delta + 0.5 * eff_ay * delta * delta
         x1, y1, x2, y2 = track.bbox
         return x1 + shift_x, y1 + shift_y, x2 + shift_x, y2 + shift_y
 
@@ -204,12 +212,14 @@ class KinematicMemoryTracker:
             predicted = self._predict_bbox(track, frame_idx)
             for detection_index, detection in enumerate(detections):
                 implied_speed = self._implied_speed(track, detection, frame_idx)
-                if implied_speed > self.max_implied_speed_px_per_frame:
+                iou = self._iou(predicted, detection["bbox"])
+                if (
+                    implied_speed > self.max_implied_speed_px_per_frame
+                    or iou < self.min_matching_iou
+                ):
                     costs[track_index, detection_index] = impossible_cost
                 else:
-                    costs[track_index, detection_index] = 1.0 - self._iou(
-                        predicted, detection["bbox"]
-                    )
+                    costs[track_index, detection_index] = 1.0 - iou
 
         row_indices, column_indices = linear_sum_assignment(costs)
         matches: List[Tuple[int, int]] = []
@@ -439,7 +449,13 @@ class KinematicMemoryTracker:
         output_tracks: List[TrackedPlayer] = []
         for track, bbox, state in current_tracks:
             self._record_track(track, frame_idx)
-            self.trail_history[track.track_id].append(self._foot(bbox))
+            foot = self._foot(bbox)
+            # Clear stale trajectory history if this track has a discontinuous jump from previous observation
+            if self.trail_history[track.track_id]:
+                last_foot = self.trail_history[track.track_id][-1]
+                if math.hypot(foot[0] - last_foot[0], foot[1] - last_foot[1]) > self.max_implied_speed_px_per_frame:
+                    self.trail_history[track.track_id].clear()
+            self.trail_history[track.track_id].append(foot)
             output_tracks.append(
                 self._to_tracked_player(track, bbox, frame_idx, fps, state)
             )
@@ -450,17 +466,20 @@ class KinematicMemoryTracker:
             gap = frame_idx - track.last_seen_frame
             if self.min_ghost_frames <= gap <= self.max_ghost_frames:
                 ghost_bbox = self._predict_bbox(track, frame_idx)
-                track.state = KinematicTrackState.GHOST
-                self.trail_history[track.track_id].append(self._foot(ghost_bbox))
-                output_tracks.append(
-                    self._to_tracked_player(
-                        track,
-                        ghost_bbox,
-                        frame_idx,
-                        fps,
-                        KinematicTrackState.GHOST.value,
+                foot = self._foot(ghost_bbox)
+                # Only maintain ghost state if prediction is reasonably close to the frame area
+                if -100.0 <= foot[0] <= 2100.0 and -100.0 <= foot[1] <= 1200.0:
+                    track.state = KinematicTrackState.GHOST
+                    self.trail_history[track.track_id].append(foot)
+                    output_tracks.append(
+                        self._to_tracked_player(
+                            track,
+                            ghost_bbox,
+                            frame_idx,
+                            fps,
+                            KinematicTrackState.GHOST.value,
+                        )
                     )
-                )
 
         self.active_tracks_per_frame.append(len(output_tracks))
         tracker_ms = (time.perf_counter() - start_time) * 1000.0
@@ -524,6 +543,7 @@ class KinematicMemoryTracker:
             "min_ghost_frames": self.min_ghost_frames,
             "max_ghost_frames": self.max_ghost_frames,
             "max_implied_speed_px_per_frame": self.max_implied_speed_px_per_frame,
+            "min_matching_iou": self.min_matching_iou,
             "trail_length": self.trail_length,
             "enable_camera_motion": self.enable_camera_motion,
         }

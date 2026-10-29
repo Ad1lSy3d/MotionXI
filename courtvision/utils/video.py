@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -320,6 +321,7 @@ def draw_tracks(
     )
 
     # 2. Draw Trails for Active Tracks
+    h, w = canvas.shape[:2]
     for track in tracks:
         t_id = track.track_id
         color = get_track_color(t_id)
@@ -327,8 +329,20 @@ def draw_tracks(
         if len(trail) > 1:
             points = list(trail)
             for k in range(1, len(points)):
-                pt1 = (int(round(points[k - 1][0])), int(round(points[k - 1][1])))
-                pt2 = (int(round(points[k][0])), int(round(points[k][1])))
+                p1 = points[k - 1]
+                p2 = points[k]
+                # Avoid drawing lines connecting points outside the visible canvas
+                if not (-50.0 <= p1[0] <= w + 50.0 and -50.0 <= p1[1] <= h + 50.0):
+                    continue
+                if not (-50.0 <= p2[0] <= w + 50.0 and -50.0 <= p2[1] <= h + 50.0):
+                    continue
+                # Physical threshold: combined player sprint (~18px/f) + fast camera motion (~50px/f) <= 70px/f.
+                # Any step > 100px indicates a track discontinuity or identity swap; break the line.
+                step_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                if step_dist > 100.0:
+                    continue
+                pt1 = (int(round(p1[0])), int(round(p1[1])))
+                pt2 = (int(round(p2[0])), int(round(p2[1])))
                 thickness = max(1, int(1 + (k / len(points)) * 2))
                 cv2.line(canvas, pt1, pt2, color, thickness, cv2.LINE_AA)
 

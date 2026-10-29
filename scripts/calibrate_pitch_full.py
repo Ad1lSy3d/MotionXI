@@ -27,10 +27,11 @@ Y axis: pitch width,  0 → 68 m  (near touchline → far touchline).
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -164,16 +165,123 @@ def draw_overlay(frame, state: CalibrationState) -> None:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 100), 1, cv2.LINE_AA)
 
 
+def render_pitch_lines_overlay(
+    frame: np.ndarray,
+    H: np.ndarray,
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+) -> np.ndarray:
+    """Project standard pitch markings onto an image using homography H (image -> pitch)."""
+    overlay = frame.copy()
+    try:
+        H_inv = np.linalg.inv(H)
+    except Exception:
+        return overlay
+
+    def _proj(qx: float, qy: float) -> Tuple[int, int]:
+        v = H_inv @ np.array([qx, qy, 1.0], dtype=np.float64)
+        if abs(v[2]) < 1e-7:
+            return -1, -1
+        return int(round(v[0] / v[2])), int(round(v[1] / v[2]))
+
+    def _draw_line(p1: Tuple[float, float], p2: Tuple[float, float], color=(0, 255, 0), thickness=2) -> None:
+        pt1 = _proj(*p1)
+        pt2 = _proj(*p2)
+        if pt1[0] >= 0 and pt2[0] >= 0:
+            cv2.line(overlay, pt1, pt2, color, thickness, cv2.LINE_AA)
+
+    # Perimeter
+    _draw_line((0.0, 0.0), (pitch_length, 0.0))
+    _draw_line((pitch_length, 0.0), (pitch_length, pitch_width))
+    _draw_line((pitch_length, pitch_width), (0.0, pitch_width))
+    _draw_line((0.0, pitch_width), (0.0, 0.0))
+
+    # Halfway line
+    _draw_line((pitch_length / 2.0, 0.0), (pitch_length / 2.0, pitch_width))
+
+    # Center circle
+    angles = np.linspace(0, 2 * np.pi, 72)
+    circle_pts = [_proj(pitch_length / 2.0 + 9.15 * np.cos(a), pitch_width / 2.0 + 9.15 * np.sin(a)) for a in angles]
+    for i in range(len(circle_pts) - 1):
+        if circle_pts[i][0] >= 0 and circle_pts[i + 1][0] >= 0:
+            cv2.line(overlay, circle_pts[i], circle_pts[i + 1], (0, 255, 0), 2, cv2.LINE_AA)
+
+    # Left PA & 6-yd
+    _draw_line((0.0, 13.84), (16.5, 13.84))
+    _draw_line((16.5, 13.84), (16.5, 54.16))
+    _draw_line((16.5, 54.16), (0.0, 54.16))
+    _draw_line((0.0, 24.84), (5.5, 24.84))
+    _draw_line((5.5, 24.84), (5.5, 43.16))
+    _draw_line((5.5, 43.16), (0.0, 43.16))
+
+    # Right PA & 6-yd
+    _draw_line((pitch_length, 13.84), (pitch_length - 16.5, 13.84))
+    _draw_line((pitch_length - 16.5, 13.84), (pitch_length - 16.5, 54.16))
+    _draw_line((pitch_length - 16.5, 54.16), (pitch_length, 54.16))
+    _draw_line((pitch_length, 24.84), (pitch_length - 5.5, 24.84))
+    _draw_line((pitch_length - 5.5, 24.84), (pitch_length - 5.5, 43.16))
+    _draw_line((pitch_length - 5.5, 43.16), (pitch_length, 43.16))
+
+    # Penalty spots & center spot
+    for spot in [(11.0, 34.0), (pitch_length / 2.0, pitch_width / 2.0), (pitch_length - 11.0, 34.0)]:
+        pt = _proj(*spot)
+        if pt[0] >= 0:
+            cv2.circle(overlay, pt, 4, (0, 0, 255), -1, cv2.LINE_AA)
+
+    return overlay
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Full-pitch homography calibration")
     parser.add_argument("--video",  default="data/test_match.mp4", help="Video file")
     parser.add_argument("--output", default="data/homography_full_pitch.json",
                         help="Output calibration JSON path")
+    parser.add_argument("--points-file", default=None,
+                        help="Optional JSON file with pre-defined correspondences for automated calibration")
+    parser.add_argument("--overlay-output", default=None,
+                        help="Optional output path to save visual validation pitch overlay")
     args = parser.parse_args()
 
     if not Path(args.video).exists():
         print(f"[ERROR] Video not found: {args.video}")
         sys.exit(1)
+
+    calibrator = HomographyCalibrator()
+
+    # Non-interactive mode via pre-defined points file
+    if args.points_file is not None:
+        p_path = Path(args.points_file)
+        if not p_path.exists():
+            print(f"[ERROR] Points file not found: {args.points_file}")
+            sys.exit(1)
+        with open(p_path, "r", encoding="utf-8") as f:
+            points_data = json.load(f)
+        for pt in points_data:
+            calibrator.add_correspondence(
+                float(pt["pixel_x"]),
+                float(pt["pixel_y"]),
+                float(pt["pitch_x"]),
+                float(pt["pitch_y"]),
+                label=pt.get("label"),
+            )
+        print(f"[INFO] Loaded {len(calibrator.correspondences)} correspondences from {p_path}")
+        result = calibrator.estimate()
+        state = CalibrationState(calibrator)
+        state.last_result = result
+        state.estimate()
+
+        saved_path = calibrator.save(args.output)
+        print(f"[SAVED] Calibration written to {saved_path}")
+
+        if args.overlay_output is not None:
+            cap = cv2.VideoCapture(args.video)
+            ret, frame = cap.read()
+            cap.release()
+            if ret and result.is_valid:
+                ov = render_pitch_lines_overlay(frame, result.H)
+                cv2.imwrite(args.overlay_output, ov)
+                print(f"[OVERLAY] Saved pitch overlay validation image to {args.overlay_output}")
+        return
 
     print("\n=== CourtVision Full-Pitch Landmark Calibrator ===")
     print("Available landmark hotkeys:")
@@ -189,7 +297,6 @@ def main() -> None:
         print("[ERROR] Could not read first frame from video.")
         sys.exit(1)
 
-    calibrator = HomographyCalibrator()
     state = CalibrationState(calibrator)
 
     win = "CourtVision Full-Pitch Calibrator"
