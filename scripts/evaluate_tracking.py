@@ -181,6 +181,7 @@ def create_tracker(
     momentum_window: int = 10,
     speed_gate: float = 120.0,
     enable_camera_motion: bool = False,
+    min_consecutive_frames: int = 2,
 ) -> Any:
     """Instantiate either ByteTrack or KMT tracker with specified parameters."""
     if tracker_type == "kmt":
@@ -196,6 +197,7 @@ def create_tracker(
         lost_track_buffer=track_buffer,
         minimum_matching_threshold=match_thresh,
         frame_rate=int(fps),
+        minimum_consecutive_frames=min_consecutive_frames,
         trail_length=trail_length,
     )
 

@@ -15,8 +15,14 @@ Design constraints
 * A spatial noise deadband suppresses sub-centimetre jitter:  displacement steps
   smaller than ``min_displacement_m`` (default 0.05 m) are counted as zero.
 * Occlusion gaps -- runs of consecutive *invalid* observations -- are detected
-  and counted but do NOT contribute distance or speed samples.  No position
-  imputation is performed.
+  and counted. Frame gaps and delta time are correctly accounted for across valid steps.
+* Physical plausibility validation: Instantaneous displacement steps exceeding
+  ``max_plausible_speed_kmh`` (default 38.0 km/h, elite football sprint threshold)
+  are flagged as detection/projection outliers and excluded from physical metrics
+  accumulation, while being preserved for diagnostics.
+* Speed smoothing: Rolling moving-average smoothing (default 5 frames, ~0.17s)
+  is applied to eliminate single-frame noise before computing top speed, average
+  speed, and sprint bouts.
 * Sprint detection requires speed >= ``sprint_threshold_kmh`` sustained for at
   least ``sprint_min_duration_s`` seconds (default 1.0 s).
 * All public results are JSON-serialisable (plain Python scalars / dicts / lists).
@@ -38,6 +44,8 @@ from courtvision.tracking.track_types import TrackedPlayer
 DEFAULT_SPRINT_THRESHOLD_KMH: float = 25.0
 DEFAULT_SPRINT_MIN_DURATION_S: float = 1.0
 DEFAULT_MIN_DISPLACEMENT_M: float = 0.05  # deadband: ignore jitter < 5 cm
+DEFAULT_MAX_PLAUSIBLE_SPEED_KMH: float = 38.0  # football sprint validation threshold
+DEFAULT_SMOOTH_WINDOW: int = 5  # 5-frame moving average window (~0.17s at 30 fps)
 _MS_TO_KMH: float = 3.6
 
 
@@ -59,14 +67,19 @@ class PlayerMetrics:
         Persistent integer identifier shared across all frames for this player.
     distance_km:
         Total straight-line distance covered in kilometres, accumulated from
-        consecutive valid pitch-coordinate steps (deadband applied).
+        consecutive valid pitch-coordinate steps (deadband applied, outliers excluded).
     avg_speed_kmh:
-        Mean of all instantaneous speed samples (km/h).  ``None`` if fewer than
-        two valid consecutive observations with positive dt exist.
+        Mean of smoothed speed samples (km/h).  ``None`` if fewer than two valid
+        consecutive observations with positive dt exist.
     top_speed_kmh:
-        Maximum instantaneous speed sample (km/h).  ``None`` if same condition.
+        Maximum smoothed speed sample (km/h).  ``None`` if same condition.
+    max_raw_speed_kmh:
+        Maximum single-frame unconstrained instantaneous speed recorded before
+        plausibility filtering (km/h).
+    max_acceleration_ms2:
+        Maximum positive acceleration recorded between smoothed speeds (m/s^2).
     sprint_count:
-        Number of discrete sprint bouts where speed exceeded
+        Number of discrete sprint bouts where smoothed speed exceeded
         ``sprint_threshold_kmh`` for at least ``sprint_min_duration_s`` seconds.
     sprint_threshold_kmh:
         Threshold used for sprint detection (km/h).
@@ -84,12 +97,19 @@ class PlayerMetrics:
     time_span_s:
         Elapsed time in seconds between the first and last valid observation.
         ``None`` if fewer than two valid observations exist.
+    outlier_count:
+        Number of instantaneous jump intervals flagged and rejected by the
+        plausibility threshold.
+    outlier_events:
+        Diagnostic details for each rejected outlier interval.
     """
 
     track_id: int
     distance_km: float = 0.0
     avg_speed_kmh: Optional[float] = None
     top_speed_kmh: Optional[float] = None
+    max_raw_speed_kmh: Optional[float] = None
+    max_acceleration_ms2: Optional[float] = None
     sprint_count: int = 0
     sprint_threshold_kmh: float = DEFAULT_SPRINT_THRESHOLD_KMH
     sprint_min_duration_s: float = DEFAULT_SPRINT_MIN_DURATION_S
@@ -98,6 +118,8 @@ class PlayerMetrics:
     coverage_ratio: float = 0.0
     occlusion_gaps: int = 0
     time_span_s: Optional[float] = None
+    outlier_count: int = 0
+    outlier_events: List[Dict[str, Any]] = field(default_factory=list)
     # Private: cached speed samples (excluded from to_dict)
     _speed_samples: List[float] = field(default_factory=list, repr=False, compare=False)
 
@@ -228,6 +250,9 @@ def compute_player_metrics(
     sprint_threshold_kmh: float = DEFAULT_SPRINT_THRESHOLD_KMH,
     sprint_min_duration_s: float = DEFAULT_SPRINT_MIN_DURATION_S,
     min_displacement_m: float = DEFAULT_MIN_DISPLACEMENT_M,
+    max_plausible_speed_kmh: Optional[float] = DEFAULT_MAX_PLAUSIBLE_SPEED_KMH,
+    smooth_window: int = DEFAULT_SMOOTH_WINDOW,
+    max_gap_frames: Optional[int] = None,
 ) -> Dict[int, PlayerMetrics]:
     """Compute per-player physical analytics from a flat observation sequence.
 
@@ -249,6 +274,15 @@ def compute_player_metrics(
     min_displacement_m:
         Spatial deadband (metres) -- steps below this value are treated as zero.
         Default 0.05 m.
+    max_plausible_speed_kmh:
+        Biomechanical speed ceiling (km/h).  Jumps exceeding this value are flagged
+        as detection outliers and rejected from physical distance/speed calculations.
+        Set to ``None`` to disable plausibility rejection. Default 38.0 km/h.
+    smooth_window:
+        Window size (frames) for moving-average speed smoothing. Default 5.
+    max_gap_frames:
+        Optional maximum frame gap between consecutive valid observations before
+        treating as a track discontinuity. Default None (disabled).
 
     Returns
     -------
@@ -285,11 +319,13 @@ def compute_player_metrics(
         # Resolve timestamps for the full track sequence
         timestamps = _resolve_timestamps(track_obs, fps)
 
-        # Collect valid observations with their resolved timestamps
-        valid_with_ts: List[Tuple[float, float, float]] = []  # (t, px, py)
+        # Collect valid observations with their resolved timestamps and frame index
+        valid_with_ts: List[Tuple[int, float, float, float]] = []  # (frame, t, px, py)
         for obs, t in zip(track_obs, timestamps):
             if _is_valid(obs):
-                valid_with_ts.append((t, float(obs.pitch_x), float(obs.pitch_y)))  # type: ignore[arg-type]
+                valid_with_ts.append(
+                    (obs.frame, t, float(obs.pitch_x), float(obs.pitch_y))  # type: ignore[arg-type]
+                )
 
         metrics.valid_samples = len(valid_with_ts)
         metrics.coverage_ratio = (
@@ -304,44 +340,120 @@ def compute_player_metrics(
             continue
 
         # Time span
-        metrics.time_span_s = valid_with_ts[-1][0] - valid_with_ts[0][0]
+        metrics.time_span_s = valid_with_ts[-1][1] - valid_with_ts[0][1]
 
         # ------------------------------------------------------------------
-        # 3. Accumulate distance and build speed series
+        # 3. Accumulate distance and build speed series with outlier rejection
         # ------------------------------------------------------------------
         total_distance_m = 0.0
-        # (t_start, dt, speed_kmh) -- dt is the interval length for sprint timing
-        speed_series: List[Tuple[float, float, float]] = []
+        valid_speed_intervals: List[Tuple[float, float, float]] = []
+        outlier_events: List[Dict[str, Any]] = []
+        max_raw_speed_kmh: float = 0.0
 
-        for (t0, px0, py0), (t1, px1, py1) in zip(valid_with_ts, valid_with_ts[1:]):
+        obs_by_frame = {o.frame: o for o in track_obs}
+
+        for (f0, t0, px0, py0), (f1, t1, px1, py1) in zip(valid_with_ts, valid_with_ts[1:]):
+            frame_gap = f1 - f0
+            if frame_gap <= 0:
+                continue  # duplicate frame
+
+            # Discontinuity check if configured
+            if max_gap_frames is not None and frame_gap > max_gap_frames:
+                continue
+
+            # Uncalibrated gap check: ensure no artificial displacement or speed
+            # is calculated across intervals where the player exited the calibrated zone.
+            if frame_gap > 1 and any(
+                obs_by_frame[f].in_calibrated_zone is False
+                for f in range(f0 + 1, f1)
+                if f in obs_by_frame
+            ):
+                continue
+
             dt = t1 - t0
             if dt <= 0:
-                continue  # skip duplicate timestamps
+                dt = frame_gap / (fps if fps > 0 else 25.0)
 
             dist_m = _euclidean_m(px0, py0, px1, py1)
+            raw_speed_ms = dist_m / dt
+            raw_speed_kmh = raw_speed_ms * _MS_TO_KMH
+
+            if raw_speed_kmh > max_raw_speed_kmh:
+                max_raw_speed_kmh = raw_speed_kmh
+
+            # Physical plausibility validation
+            if max_plausible_speed_kmh is not None and raw_speed_kmh > max_plausible_speed_kmh:
+                outlier_events.append({
+                    "from_frame": f0,
+                    "to_frame": f1,
+                    "dt_s": round(dt, 4),
+                    "distance_m": round(dist_m, 2),
+                    "raw_speed_kmh": round(raw_speed_kmh, 1),
+                    "threshold_kmh": max_plausible_speed_kmh,
+                    "reason": (
+                        f"Instantaneous speed {raw_speed_kmh:.1f} km/h exceeds physical "
+                        f"threshold {max_plausible_speed_kmh:.1f} km/h (bounding-box/projection jitter)"
+                    ),
+                })
+                # Reject this unphysical jump from distance and speed accumulation
+                continue
 
             # Apply deadband
-            if dist_m < min_displacement_m:
-                dist_m = 0.0
+            eff_dist_m = 0.0 if dist_m < min_displacement_m else dist_m
+            total_distance_m += eff_dist_m
 
-            total_distance_m += dist_m
-
-            speed_ms = dist_m / dt
-            speed_kmh = speed_ms * _MS_TO_KMH
-            speed_series.append((t0, dt, speed_kmh))
+            eff_speed_ms = eff_dist_m / dt
+            eff_speed_kmh = eff_speed_ms * _MS_TO_KMH
+            valid_speed_intervals.append((t0, dt, eff_speed_kmh))
 
         metrics.distance_km = total_distance_m / 1000.0
+        metrics.outlier_count = len(outlier_events)
+        metrics.outlier_events = outlier_events
+        metrics.max_raw_speed_kmh = float(max_raw_speed_kmh) if max_raw_speed_kmh > 0 else None
 
-        if speed_series:
-            speeds = [s for _, _, s in speed_series]
-            metrics.avg_speed_kmh = sum(speeds) / len(speeds)
-            metrics.top_speed_kmh = max(speeds)
+        # ------------------------------------------------------------------
+        # 4. Moving-average speed smoothing and metric extraction
+        # ------------------------------------------------------------------
+        if valid_speed_intervals:
+            raw_speeds = [s for _, _, s in valid_speed_intervals]
+
+            # Apply centered moving-average smoothing over smooth_window
+            smoothed_speeds: List[float] = []
+            half_w = max(1, smooth_window // 2)
+            for i in range(len(raw_speeds)):
+                w_start = max(0, i - half_w)
+                w_end = min(len(raw_speeds), i + half_w + 1)
+                window = raw_speeds[w_start:w_end]
+                smoothed_speeds.append(float(sum(window) / len(window)))
+
+            metrics.avg_speed_kmh = float(sum(smoothed_speeds) / len(smoothed_speeds))
+            metrics.top_speed_kmh = float(max(smoothed_speeds))
+
+            # Sprints from smoothed speed series
+            smoothed_series = [
+                (t, dt, s)
+                for (t, dt, _), s in zip(valid_speed_intervals, smoothed_speeds)
+            ]
             metrics.sprint_count = _count_sprints(
-                speed_series,
+                smoothed_series,
                 sprint_threshold_kmh,
                 sprint_min_duration_s,
             )
-            metrics._speed_samples = speeds
+            metrics._speed_samples = smoothed_speeds
+
+            # Max acceleration (m/s^2) between smoothed speeds
+            accels: List[float] = []
+            for i in range(1, len(smoothed_speeds)):
+                dt_step = valid_speed_intervals[i][0] - valid_speed_intervals[i - 1][0]
+                if dt_step <= 0:
+                    dt_step = valid_speed_intervals[i][1]
+                if dt_step > 0:
+                    dv_ms = (smoothed_speeds[i] - smoothed_speeds[i - 1]) / _MS_TO_KMH
+                    a = dv_ms / dt_step
+                    if a > 0:
+                        accels.append(a)
+            if accels:
+                metrics.max_acceleration_ms2 = float(max(accels))
 
         results[track_id] = metrics
 

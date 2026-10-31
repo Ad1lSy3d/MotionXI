@@ -324,7 +324,7 @@ class KinematicMemoryTracker:
                 foot_x, foot_y
             )
             in_calibrated_zone = self.homography.is_within_calibrated_zone(
-                projected_x, projected_y
+                projected_x, projected_y, margin_meters=0.0
             )
             pitch_x = round(projected_x, 3) if math.isfinite(projected_x) else None
             pitch_y = round(projected_y, 3) if math.isfinite(projected_y) else None

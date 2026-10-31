@@ -1,4 +1,6 @@
 import math
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -121,6 +123,53 @@ def create_video_writer(
         fourcc_alt = cv2.VideoWriter_fourcc(*"avc1")
         writer = cv2.VideoWriter(str(path), fourcc_alt, fps, (width, height))
     return writer
+
+
+def finalize_video_for_web(video_path: Union[str, Path]) -> bool:
+    """Ensure an output MP4 video is encoded as web-compatible H.264 (yuv420p) with faststart
+
+    so that modern browsers (Google Chrome, Edge, Safari, Firefox) can render it
+    without displaying a black screen.
+    """
+    path = Path(video_path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+
+    ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+    if not Path(ffmpeg_bin).is_file():
+        return False
+
+    temp_path = path.with_name(f"{path.stem}_web_{path.suffix}")
+    try:
+        cmd = [
+            str(ffmpeg_bin),
+            "-y",
+            "-i",
+            str(path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(temp_path),
+        ]
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+        )
+        if res.returncode == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
+            temp_path.replace(path)
+            return True
+    except Exception:
+        pass
+    finally:
+        if temp_path.is_file():
+            temp_path.unlink(missing_ok=True)
+    return False
 
 
 def draw_detections(

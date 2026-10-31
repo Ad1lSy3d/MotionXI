@@ -236,7 +236,7 @@ class PitchHomography:
         foot_x = (x1 + x2) / 2.0
         foot_y = float(y2)
         pitch_x, pitch_y, is_valid = self.project_point(foot_x, foot_y, margin_meters=margin_meters)
-        in_calibrated_zone = self.is_within_calibrated_zone(pitch_x, pitch_y)
+        in_calibrated_zone = self.is_within_calibrated_zone(pitch_x, pitch_y, margin_meters=margin_meters)
         return foot_x, foot_y, pitch_x, pitch_y, is_valid, in_calibrated_zone
 
     def is_within_pitch(
@@ -256,7 +256,7 @@ class PitchHomography:
         self,
         pitch_x: float,
         pitch_y: float,
-        margin_meters: float = 5.0,
+        margin_meters: float = 0.0,
     ) -> bool:
         """Check if pitch coordinate lies within the calibrated region.
 
@@ -264,6 +264,7 @@ class PitchHomography:
             [calibrated_x_min - margin_meters, calibrated_x_max + margin_meters] x
             [calibrated_y_min - margin_meters, calibrated_y_max + margin_meters]
 
+        By default margin_meters=0.0 to ensure zero out-of-bounds leakage.
         For partial calibrations on either end of the pitch (e.g. left or right penalty
         box), both minimum and maximum bounds ensure uncalibrated opposite ends or
         midfield are rejected.

@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0d0e12">
+    <title>CourtVision AI — Football Match Analytics</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <!-- Left Navigation Rail -->
+    <aside class="rail" aria-label="Sidebar Navigation">
+      <a class="brand" href="#home" aria-label="CourtVision AI Home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="label">CourtVision <small>AI</small></span>
+      </a>
+
+      <nav class="nav" aria-label="Main Navigation">
+        <a class="nav-link active" href="#home" data-nav="home" id="nav-home">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-8.5Z"/></svg>
+          <span class="label">Pipeline Setup</span>
+        </a>
+        <a class="nav-link" href="#results" data-nav="results" id="nav-results" data-running="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9.5 5 2.5-5 2.5v-5Z"/></svg>
+          <span class="label">Match Analytics</span>
+          <span class="nav-dot" aria-hidden="true" title="Job Running"></span>
+        </a>
+      </nav>
+
+      <div class="rail-footer">
+        <div class="rail-note">
+          <span class="status-indicator ready" id="global-status-dot"></span>
+          <span class="label">Local Engine Ready</span>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main-content">
+      <!-- VIEW: HOME / PIPELINE SETUP -->
+      <section data-view="home" aria-labelledby="hero-title">
+        <div class="hero">
+          <div class="hero-inner">
+            <ul class="chips" aria-label="System readiness">
+              <li><span class="status-indicator" id="model-indicator"></span>Detector <b id="model-status">Checking…</b></li>
+              <li><span class="status-indicator" id="homography-indicator"></span>Pitch Calibration <b id="homography-status">Checking…</b></li>
+              <li><b id="video-count">—</b> Match Videos</li>
+              <li id="demo-chip" class="chip-demo" hidden><span class="status-indicator ready"></span>Demo Match <b>Ready</b></li>
+            </ul>
+            <span id="model-detail" hidden></span>
+
+            <h1 id="hero-title">Choose a video</h1>
+            <p class="hero-sub" id="hero-sub">Select a match video below or launch the verified demonstration match to explore occlusion-aware player tracking, physical performance metrics, and tactical pitch heatmaps.</p>
+
+            <div class="hero-actions">
+              <button class="button button-primary" id="run-button" type="button">
+                <span>Run Pipeline</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15a.8.8 0 0 0 1.2.7l12-7.5a.8.8 0 0 0 0-1.4l-12-7.5A.8.8 0 0 0 7 4.5Z"/></svg>
+              </button>
+              <button class="button button-secondary" id="demo-button" type="button" title="Load the pre-computed 90-frame KMT match analytics with heatmaps and trajectories">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/><path d="m10 8 6 4-6 4V8Z"/></svg>
+                <span>Load Demo Match (KMT · 90 Frames)</span>
+              </button>
+            </div>
+            <div class="inline-message" id="run-message" role="status"></div>
+
+            <div class="notice" id="model-notice" hidden>
+              <p><strong>Model weights checkpoint not found.</strong> Place <code>weights/best.pt</code> to execute custom video pipelines. (You can still explore the Demo Match analytics without model weights.)</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="rows">
+          <!-- Row 1: Match Video Selector -->
+          <div class="row">
+            <div class="row-head">
+              <div>
+                <h2>Match Videos</h2>
+                <p class="row-subtitle">Select a video to process or upload raw footage for tracking</p>
+              </div>
+              <button class="icon-button" id="refresh-videos" type="button" title="Refresh video library" aria-label="Refresh video list">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5"/></svg>
+              </button>
+            </div>
+            <select id="video-select" hidden aria-hidden="true" tabindex="-1"><option value="">Loading videos…</option></select>
+            <div class="track" id="video-track" role="radiogroup" aria-label="Match videos">
+              <label class="card card-add" for="video-file">
+                <span class="poster"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
+                <span class="card-title">Upload Video</span>
+                <span class="card-meta">MP4, MOV, AVI, MKV · up to 512 MB</span>
+              </label>
+            </div>
+            <input id="video-file" type="file" accept=".mp4,.mov,.avi,.mkv,video/*" hidden>
+            <div id="upload-message" class="inline-message" role="status"></div>
+          </div>
+
+          <!-- Row 2: Pipeline Configuration -->
+          <div class="row">
+            <div class="row-head">
+              <div>
+                <h2>Pipeline Configuration</h2>
+                <p class="row-subtitle">Configure multi-object tracking and occlusion-handling algorithms</p>
+              </div>
+            </div>
+
+            <div class="config-grid">
+              <!-- Mode Selection -->
+              <div class="config-group">
+                <label class="field-label">Execution Mode</label>
+                <fieldset class="mode-fieldset">
+                  <legend class="sr-only">Choose execution mode</legend>
+                  <label class="mode-option selected">
+                    <input type="radio" name="mode" value="tracking" checked>
+                    <span class="radio-visual"></span>
+                    <span class="mode-copy">
+                      <strong>Player Tracking & Analytics</strong>
+                      <small>Full pipeline: persistent identities, speed, distance, heatmaps & trajectories</small>
+                    </span>
+                  </label>
+                  <label class="mode-option">
+                    <input type="radio" name="mode" value="detection">
+                    <span class="radio-visual"></span>
+                    <span class="mode-copy">
+                      <strong>Detection Only</strong>
+                      <small>Frame-by-frame player bounding boxes without identity persistence</small>
+                    </span>
+                  </label>
+                </fieldset>
+              </div>
+
+              <!-- Tracker Selection -->
+              <div class="config-group" id="tracker-choice">
+                <label class="field-label" for="tracker-select">Multi-Object Tracker</label>
+                <div class="tracker-select-wrapper">
+                  <select id="tracker-select" class="form-select">
+                    <option value="kmt" selected>KMT — Kinematic Memory Tracker (Occlusion-Aware)</option>
+                    <option value="bytetrack">ByteTrack — IoU Association Baseline</option>
+                  </select>
+                </div>
+                <p class="field-help" id="tracker-help-text">
+                  <strong>Kinematic Memory Tracker (KMT):</strong> Maintains player identity through dense crowds and physical occlusions by caching velocity vectors and gating re-identifications.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIEW: RESULTS / MATCH ANALYTICS DASHBOARD -->
+      <section data-view="results" aria-labelledby="results-title" hidden>
+        <div class="results-page">
+          <!-- Results Top Header Bar -->
+          <header class="results-header">
+            <div class="header-left">
+              <a href="#home" class="button-back" id="back-to-setup" title="Return to configuration">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                <span>Pipeline Setup</span>
+              </a>
+              <div class="header-title-block">
+                <h1 id="results-title">Match Analytics</h1>
+                <div class="header-badges">
+                  <span class="badge" id="job-mode-badge">Tracking</span>
+                  <span class="badge badge-accent" id="job-tracker-badge">KMT</span>
+                  <span class="badge badge-calib" id="job-calib-badge" title="Physical metrics calculated in calibrated 18-yard box">Penalty Box Calibrated</span>
+                  <span class="job-state" id="job-state" data-status="ready">Ready</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="header-actions">
+              <button class="button button-sm button-ghost" id="quick-demo-btn" type="button" title="Switch to Verified Demo Match">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/><path d="m10 8 6 4-6 4V8Z"/></svg>
+                <span>Demo Match</span>
+              </button>
+              <button class="button button-sm button-ghost" id="cancel-job-btn" type="button" hidden>
+                <span>Cancel Run</span>
+              </button>
+              <div class="export-dropdown">
+                <button class="button button-sm button-secondary" id="export-btn" type="button" aria-haspopup="true">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                  <span>Export Data</span>
+                </button>
+                <div class="export-menu" id="export-menu" hidden>
+                  <a href="#" id="export-json" download="match_analytics.json" class="export-item">Match Analytics (JSON)</a>
+                  <a href="#" id="export-csv" download="tracks.csv" class="export-item">Raw Tracks (CSV)</a>
+                  <a href="#" id="export-metrics-csv" download="player_metrics.csv" class="export-item">Player Metrics (CSV)</a>
+                  <a href="#" id="export-video" download="annotated_match.mp4" class="export-item">Annotated Video (MP4)</a>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <!-- Empty State (When no job is running or selected) -->
+          <div class="panel empty-state" id="empty-state">
+            <div class="empty-state-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m10 8 6 4-6 4V8Z"/></svg>
+            </div>
+            <h2>No Match Loaded Yet</h2>
+            <p>Run a video tracking pipeline from setup or explore the verified 90-frame demonstration match to inspect player physical metrics, trajectories, and heatmaps.</p>
+            <div class="empty-actions">
+              <button class="button button-primary" id="empty-load-demo" type="button">Load Demo Match (KMT)</button>
+              <a class="button button-secondary" href="#home">Choose Video</a>
+            </div>
+          </div>
+
+          <!-- Main Two-Column Analytics Layout -->
+          <div id="job-results" class="results-layout" hidden>
+            <!-- LEFT / MAIN CONTENT (~70%) -->
+            <div class="results-main">
+              <!-- Video Player & Canvas Tracking Overlay -->
+              <div class="video-card-container">
+                <div class="video-card-header">
+                  <div class="video-title-row">
+                    <span class="video-section-tag">Match Footage</span>
+                    <span class="video-source-name" id="video-source-label">Clean Match Footage</span>
+                  </div>
+                  <!-- Video Mode Switcher (Interactive vs Pre-rendered Annotated) -->
+                  <div class="video-mode-switch" role="group" aria-label="Video Rendering Mode">
+                    <button class="mode-pill active" id="btn-mode-interactive" type="button" title="Interactive bounding boxes, tags, and selection halos rendered over clean match video">
+                      <span class="mode-pill-dot"></span>
+                      <span>Interactive Overlay</span>
+                    </button>
+                    <button class="mode-pill" id="btn-mode-annotated" type="button" title="Pipeline pre-rendered annotated video with burned-in tracking boxes">
+                      <span>Annotated Video</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="video-wrapper" id="video-wrapper">
+                  <video id="preview-video" playsinline preload="auto"></video>
+                  <canvas id="video-overlay" aria-label="Interactive player tracking overlay"></canvas>
+                  <div class="video-loading-scrim" id="video-loading" hidden>
+                    <div class="spinner"></div>
+                    <span>Loading Video Stream…</span>
+                  </div>
+                  <div class="video-fallback-banner" id="video-fallback-banner" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <span>Clean match video unavailable. Switched automatically to pipeline-annotated video fallback.</span>
+                  </div>
+                </div>
+
+                <!-- Custom Video Controls Bar -->
+                <div class="video-controls">
+                  <button class="icon-btn play-pause-btn" id="ctrl-play" type="button" title="Play/Pause (Space)">
+                    <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15a.8.8 0 0 0 1.2.7l12-7.5a.8.8 0 0 0 0-1.4l-12-7.5A.8.8 0 0 0 7 4.5Z"/></svg>
+                    <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+                  </button>
+
+                  <div class="scrub-container">
+                    <input type="range" class="scrub-slider" id="video-scrubber" min="0" max="100" step="0.1" value="0" aria-label="Seek video">
+                    <div class="timecode-display">
+                      <span id="time-current">00:00.0</span> / <span id="time-total">00:00.0</span>
+                      <span class="frame-counter" id="frame-counter">(Frame 0/0)</span>
+                    </div>
+                  </div>
+
+                  <div class="controls-right">
+                    <!-- Overlay Toggles -->
+                    <label class="ctrl-toggle" title="Toggle bounding box boxes">
+                      <input type="checkbox" id="toggle-bboxes" checked>
+                      <span>Boxes</span>
+                    </label>
+                    <label class="ctrl-toggle" title="Toggle player ID tags">
+                      <input type="checkbox" id="toggle-tags" checked>
+                      <span>Tags</span>
+                    </label>
+
+                    <!-- Playback Speed -->
+                    <select id="ctrl-speed" class="speed-select" title="Playback speed">
+                      <option value="0.5">0.5x</option>
+                      <option value="1" selected>1.0x</option>
+                      <option value="1.5">1.5x</option>
+                      <option value="2">2.0x</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Match Overview Metrics Strip (Prioritized 5 Critical Metrics) -->
+              <div class="metrics-strip" id="match-metrics-strip" aria-label="Match summary statistics">
+                <!-- 1. Duration -->
+                <div class="metric-card">
+                  <span class="metric-label">Match Duration</span>
+                  <div class="metric-value" id="m-duration">—</div>
+                  <span class="metric-sub" id="m-frames">— frames</span>
+                </div>
+                <!-- 2. Processing Speed -->
+                <div class="metric-card">
+                  <span class="metric-label">Processing FPS</span>
+                  <div class="metric-value metric-accent" id="m-fps">— FPS</div>
+                  <span class="metric-sub" id="m-latency">Real-time inference</span>
+                </div>
+                <!-- 3. Active Tracks (Peak simultaneous active vs total IDs) -->
+                <div class="metric-card">
+                  <span class="metric-label">Peak Active Tracks</span>
+                  <div class="metric-value metric-orange" id="m-players">Peak: —</div>
+                  <span class="metric-sub" id="m-players-sub">Avg Active: — tracks · — unique IDs</span>
+                </div>
+                <!-- 4. Total Calibrated Distance -->
+                <div class="metric-card">
+                  <span class="metric-label">Total Calibrated Distance</span>
+                  <div class="metric-value" id="m-team-dist">— m</div>
+                  <span class="metric-sub" id="m-calib-sub">18-yd penalty box</span>
+                </div>
+                <!-- 5. Highest Validated Speed -->
+                <div class="metric-card">
+                  <span class="metric-label">Highest Validated Speed</span>
+                  <div class="metric-value metric-green" id="m-top-speed">— km/h</div>
+                  <span class="metric-sub" id="m-top-speed-sub">Biomechanical validation: passed</span>
+                </div>
+              </div>
+
+              <!-- Analytics Tabs Navigation -->
+              <div class="analytics-tabs-container">
+                <nav class="analytics-tabs" role="tablist">
+                  <button class="tab-btn active" role="tab" aria-selected="true" data-tab="tab-overview">Match Overview</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" data-tab="tab-players">Players & Comparison</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" data-tab="tab-heatmaps">Heatmaps</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" data-tab="tab-tactical">Tactical Pitch (2D)</button>
+                  <button class="tab-btn" role="tab" aria-selected="false" data-tab="tab-diagnostics">Diagnostics & Logs</button>
+                </nav>
+
+                <!-- TAB 1: OVERVIEW -->
+                <div class="tab-pane active" id="tab-overview" role="tabpanel">
+                  <div class="overview-grid">
+                    <!-- Top Performers Leaderboard -->
+                    <div class="dashboard-card leaderboard-card">
+                      <div class="card-head">
+                        <h3>Performance Leaderboard</h3>
+                        <span class="card-tag">Physical Metrics</span>
+                      </div>
+                      <div class="leaderboard-columns">
+                        <div class="lead-col">
+                          <h4>Most Distance</h4>
+                          <ol class="lead-list" id="lead-distance"></ol>
+                        </div>
+                        <div class="lead-col">
+                          <h4>Top Speed</h4>
+                          <ol class="lead-list" id="lead-speed"></ol>
+                        </div>
+                        <div class="lead-col">
+                          <h4>Sprints (≥18 km/h)</h4>
+                          <ol class="lead-list" id="lead-sprints"></ol>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Pipeline Telemetry -->
+                    <div class="dashboard-card telemetry-card">
+                      <div class="card-head">
+                        <h3>Pipeline Telemetry & Calibration</h3>
+                        <span class="card-tag">Grounding</span>
+                      </div>
+                      <dl class="telemetry-list">
+                        <div>
+                          <dt>Tracker</dt>
+                          <dd id="t-tracker-name">—</dd>
+                        </div>
+                        <div>
+                          <dt>Camera Motion Comp</dt>
+                          <dd id="t-camera-motion">—</dd>
+                        </div>
+                        <div>
+                          <dt>Detector Model</dt>
+                          <dd id="t-detector-model">YOLOv11m</dd>
+                        </div>
+                        <div>
+                          <dt>Calibration Scope</dt>
+                          <dd id="t-calib-scope">18-Yard Penalty Box</dd>
+                        </div>
+                        <div>
+                          <dt>Resolution</dt>
+                          <dd id="t-resolution">1920x1080</dd>
+                        </div>
+                      </dl>
+                      <div class="calib-warning-box" id="calib-warning-box">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        <p id="calib-warning-text">Physical distances and speeds are strictly calculated from player feet coordinates located inside the calibrated 18-yard penalty box zone. Uncalibrated field areas suffer from perspective divergence and are filtered from distance accumulation.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- TAB 2: PLAYERS & COMPARISON -->
+                <div class="tab-pane" id="tab-players" role="tabpanel" hidden>
+                  <!-- Selected Player Detail Card -->
+                  <div class="dashboard-card player-detail-card" id="player-detail-card">
+                    <div class="card-head">
+                      <div class="player-headline">
+                        <span class="player-color-badge" id="pd-badge"></span>
+                        <div>
+                          <h3 id="pd-tag">P01</h3>
+                          <span class="pd-sub" id="pd-sub">Track ID 1 · Active</span>
+                        </div>
+                      </div>
+                      <div class="card-actions">
+                        <button class="button button-sm button-secondary" id="pd-jump-video" type="button">
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10l5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/></svg>
+                          <span>Seek in Video</span>
+                        </button>
+                        <button class="button button-sm button-ghost" id="pd-view-heatmap" type="button">
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83"/></svg>
+                          <span>View Heatmap</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="player-metrics-grid">
+                      <div class="pm-stat">
+                        <span class="pm-label">Distance Covered</span>
+                        <div class="pm-value" id="pd-dist">— m</div>
+                        <span class="pm-sub" id="pd-dist-km">— km</span>
+                      </div>
+                      <div class="pm-stat">
+                        <span class="pm-label">Average Speed</span>
+                        <div class="pm-value" id="pd-avg-speed">— km/h</div>
+                      </div>
+                      <div class="pm-stat">
+                        <span class="pm-label">Top Speed</span>
+                        <div class="pm-value metric-orange" id="pd-top-speed">— km/h</div>
+                      </div>
+                      <div class="pm-stat">
+                        <span class="pm-label">Sprints (≥18 km/h)</span>
+                        <div class="pm-value" id="pd-sprints">—</div>
+                      </div>
+                      <div class="pm-stat">
+                        <span class="pm-label">Tracking Coverage</span>
+                        <div class="pm-value" id="pd-coverage">—%</div>
+                        <span class="pm-sub" id="pd-samples">— samples</span>
+                      </div>
+                      <div class="pm-stat">
+                        <span class="pm-label">Occlusion Gaps</span>
+                        <div class="pm-value" id="pd-occlusions">0</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Player Comparison Tool -->
+                  <div class="dashboard-card comparison-card">
+                    <div class="card-head">
+                      <h3>Head-to-Head Player Comparison</h3>
+                      <span class="card-tag">Physical Comparison</span>
+                    </div>
+
+                    <div class="compare-selectors">
+                      <div class="compare-select-block">
+                        <label for="compare-player-a">Player A</label>
+                        <select id="compare-player-a" class="form-select"></select>
+                      </div>
+                      <div class="vs-badge">VS</div>
+                      <div class="compare-select-block">
+                        <label for="compare-player-b">Player B</label>
+                        <select id="compare-player-b" class="form-select"></select>
+                      </div>
+                    </div>
+
+                    <div class="comparison-bars" id="comparison-bars">
+                      <!-- Dynamically populated comparison rows -->
+                    </div>
+                  </div>
+                </div>
+
+                <!-- TAB 3: HEATMAPS -->
+                <div class="tab-pane" id="tab-heatmaps" role="tabpanel" hidden>
+                  <div class="dashboard-card heatmap-card">
+                    <div class="card-head">
+                      <div class="heatmap-controls-bar">
+                        <div class="view-switch">
+                          <button class="switch-btn active" id="hm-switch-team" type="button">Team Heatmap</button>
+                          <button class="switch-btn" id="hm-switch-player" type="button">Individual Player</button>
+                        </div>
+                        <div class="player-select-wrap" id="hm-player-select-wrap" hidden>
+                          <label for="hm-player-select" class="sr-only">Choose Player</label>
+                          <select id="hm-player-select" class="form-select"></select>
+                        </div>
+                      </div>
+                      <a href="#" id="hm-download-link" download="heatmap.png" class="button button-sm button-secondary">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                        <span>Download PNG</span>
+                      </a>
+                    </div>
+
+                    <div class="heatmap-display">
+                      <div class="heatmap-container" id="heatmap-container">
+                        <img id="heatmap-image" src="" alt="Tactical pitch heatmap" loading="lazy">
+                        <div class="heatmap-placeholder" id="heatmap-placeholder" hidden>
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                          <p>No heatmap generated for this track.</p>
+                        </div>
+                      </div>
+                      <div class="heatmap-legend">
+                        <span class="legend-label">Low Activity</span>
+                        <div class="legend-gradient"></div>
+                        <span class="legend-label">Peak Concentration</span>
+                      </div>
+                      <p class="heatmap-caption" id="heatmap-caption">Combined spatial player density across pitch coordinates. Density calculated from valid calibrated observations.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- TAB 4: TACTICAL PITCH (2D) -->
+                <div class="tab-pane" id="tab-tactical" role="tabpanel" hidden>
+                  <div class="dashboard-card pitch-card">
+                    <div class="card-head">
+                      <div>
+                        <h3>2D Top-Down Pitch Trajectories</h3>
+                        <p class="card-subtitle">FIFA standard 105m × 68m pitch layout with calibrated tracking coordinates</p>
+                      </div>
+                      <div class="pitch-actions">
+                        <div class="view-switch" id="pitch-mode-switch" role="group" aria-label="Tactical Pitch Mode">
+                          <button class="switch-btn active" id="pitch-mode-current" type="button" title="View dynamic player positions for the selected frame">Current Frame</button>
+                          <button class="switch-btn" id="pitch-mode-avg" type="button" title="View average tactical positions across the match">Average Positions</button>
+                        </div>
+                        <label class="ctrl-toggle" id="pitch-trails-toggle-wrap">
+                          <input type="checkbox" id="pitch-all-trails">
+                          <span>Show All Trails</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <!-- Tactical Metrics Bar -->
+                    <div class="tactical-metrics-bar">
+                      <div class="tac-stat">
+                        <span class="tac-label">Team Width</span>
+                        <span class="tac-val" id="tac-width">— m</span>
+                      </div>
+                      <div class="tac-stat">
+                        <span class="tac-label">Team Length</span>
+                        <span class="tac-val" id="tac-length">— m</span>
+                      </div>
+                      <div class="tac-stat">
+                        <span class="tac-label">Centroid (X, Y)</span>
+                        <span class="tac-val" id="tac-centroid">—</span>
+                      </div>
+                      <div class="tac-stat">
+                        <span class="tac-label">Active on Pitch</span>
+                        <span class="tac-val" id="tac-active-count">—</span>
+                      </div>
+                    </div>
+
+                    <div class="pitch-canvas-wrapper">
+                      <canvas id="pitch-canvas" width="800" height="518" aria-label="Top-down football pitch diagram"></canvas>
+                    </div>
+
+                    <!-- Tactical Timeline Control & Playback Sync -->
+                    <div class="pitch-timeline-control" id="pitch-timeline-control">
+                      <button class="icon-btn" id="pitch-play-btn" type="button" title="Play / Pause match video">
+                        <svg class="icon-pitch-play" viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M7 4.5v15a.8.8 0 0 0 1.2.7l12-7.5a.8.8 0 0 0 0-1.4l-12-7.5A.8.8 0 0 0 7 4.5Z" fill="currentColor"/></svg>
+                        <svg class="icon-pitch-pause" viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" hidden><path d="M6 5h4v14H6zm8 0h4v14h-4z" fill="currentColor"/></svg>
+                      </button>
+                      <span class="pt-label">Tactical Timeline:</span>
+                      <input type="range" class="scrub-slider" id="pitch-scrubber" min="0" max="90" value="0" aria-label="Seek tactical pitch frame">
+                      <span class="pt-frame" id="pitch-frame-label">Frame 0 · 00:00.0</span>
+                    </div>
+
+                    <!-- Tactical Pitch Legend (Priority 5) -->
+                    <div class="pitch-legend-bar" id="pitch-legend-bar">
+                      <div class="legend-item">
+                        <span class="legend-swatch swatch-calib-zone"></span>
+                        <span>Calibrated 18-Yard Box</span>
+                      </div>
+                      <div class="legend-item">
+                        <span class="legend-dot dot-calib"></span>
+                        <span>Calibrated Position</span>
+                      </div>
+                      <div class="legend-item">
+                        <span class="legend-dot dot-uncalib"></span>
+                        <span>Outside Calibrated Zone</span>
+                      </div>
+                      <div class="legend-item">
+                        <span class="legend-dot dot-selected"></span>
+                        <span>Selected Player</span>
+                      </div>
+                      <div class="legend-item">
+                        <span class="legend-line line-trail"></span>
+                        <span>Trajectory Trail (&le; Current Frame)</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- TAB 5: DIAGNOSTICS & LOGS -->
+                <div class="tab-pane" id="tab-diagnostics" role="tabpanel" hidden>
+                  <div class="diagnostics-grid">
+                    <!-- Tracking Identity Fragmentation Card -->
+                    <div class="dashboard-card full-width" id="diag-frag-card">
+                      <div class="card-head">
+                        <div>
+                          <h3>Tracking Identity Fragmentation & Match Counts</h3>
+                          <p class="card-subtitle">Detailed breakdown separating simultaneous active players from accumulated tracker IDs</p>
+                        </div>
+                        <span class="card-tag">Identity Diagnostics</span>
+                      </div>
+                      <div class="frag-stats-grid">
+                        <div class="frag-stat">
+                          <span class="frag-lbl">Peak Simultaneous</span>
+                          <strong class="frag-val metric-orange" id="diag-peak-simul">20</strong>
+                          <span class="frag-sub">Maximum players on pitch at any instant</span>
+                        </div>
+                        <div class="frag-stat">
+                          <span class="frag-lbl">Average Simultaneous</span>
+                          <strong class="frag-val" id="diag-avg-simul">14.2</strong>
+                          <span class="frag-sub">Mean concurrent players per frame</span>
+                        </div>
+                        <div class="frag-stat">
+                          <span class="frag-lbl">Sustained Match Tracks</span>
+                          <strong class="frag-val metric-green" id="diag-sustained-count">68</strong>
+                          <span class="frag-sub">Persistent tracks (&ge;15 observed frames)</span>
+                        </div>
+                        <div class="frag-stat">
+                          <span class="frag-lbl">Transient Flickers</span>
+                          <strong class="frag-val" id="diag-transient-count">47</strong>
+                          <span class="frag-sub">Short-lived false/brief tracks (&lt;15 frames)</span>
+                        </div>
+                        <div class="frag-stat">
+                          <span class="frag-lbl">Total Tracker IDs</span>
+                          <strong class="frag-val" id="diag-total-ids">115</strong>
+                          <span class="frag-sub">Cumulative IDs assigned across entire match</span>
+                        </div>
+                      </div>
+                      <div class="frag-explanation">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        <p><strong>Tracking Accumulation Analysis:</strong> High cumulative tracker ID counts (e.g. 115) occur when players exit the camera field-of-view and re-enter, or when detector dropouts exceed the tracker lost buffer. Real-time active players on the pitch remain between 14 and 20. Use the <strong>Sustained</strong> filter in the player roster to inspect established match identities.</p>
+                      </div>
+                    </div>
+
+                    <!-- Speed Outlier Jump Audit Table -->
+                    <div class="dashboard-card full-width">
+                      <div class="card-head">
+                        <div>
+                          <h3>Speed Outlier Jump Audit (Biomechanical Filter)</h3>
+                          <p class="card-subtitle">Raw frame-to-frame velocity spikes rejected to prevent physically impossible speeds (threshold: 38.0 km/h)</p>
+                        </div>
+                        <span class="card-tag card-tag-orange" id="diag-outliers-count">0 jumps rejected</span>
+                      </div>
+                      <div class="table-scroll">
+                        <table class="diag-table" id="diag-outliers-table">
+                          <thead>
+                            <tr>
+                              <th>Player</th>
+                              <th>Jump Frames</th>
+                              <th>Time &Delta;t</th>
+                              <th>Distance</th>
+                              <th>Raw Velocity</th>
+                              <th>Validation Status & Reason</th>
+                            </tr>
+                          </thead>
+                          <tbody></tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <!-- Crowded Frames Table -->
+                    <div class="dashboard-card">
+                      <div class="card-head">
+                        <h3>Crowded Frames (High Occlusion Risk)</h3>
+                        <span class="card-tag" id="diag-crowded-count">0 frames</span>
+                      </div>
+                      <div class="table-scroll">
+                        <table class="diag-table" id="diag-crowded-table">
+                          <thead>
+                            <tr>
+                              <th>Frame</th>
+                              <th>Timestamp</th>
+                              <th>Players</th>
+                              <th>Max IoU</th>
+                              <th>Overlaps</th>
+                            </tr>
+                          </thead>
+                          <tbody></tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <!-- ID Switch Candidates Table -->
+                    <div class="dashboard-card">
+                      <div class="card-head">
+                        <h3>Heuristic ID Switch Candidates</h3>
+                        <span class="card-tag" id="diag-idsw-count">0 events</span>
+                      </div>
+                      <div class="table-scroll">
+                        <table class="diag-table" id="diag-idsw-table">
+                          <thead>
+                            <tr>
+                              <th>Frame</th>
+                              <th>Candidate Type</th>
+                              <th>Track IDs</th>
+                              <th>Description</th>
+                            </tr>
+                          </thead>
+                          <tbody></tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <!-- Pipeline Log Output -->
+                    <div class="dashboard-card full-width">
+                      <div class="card-head">
+                        <h3>Process Execution Log</h3>
+                        <button class="button button-sm button-ghost" id="toggle-log" type="button">Hide Log</button>
+                      </div>
+                      <pre class="log-output" id="log-output">Awaiting pipeline telemetry…</pre>
+                    </div>
+
+                    <!-- Output Artifacts List -->
+                    <div class="dashboard-card full-width">
+                      <div class="card-head">
+                        <h3>Generated Files & Output Artifacts</h3>
+                      </div>
+                      <div class="output-list" id="output-list"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- RIGHT / ANALYTICS SIDEBAR (~30%) -->
+            <aside class="results-sidebar" aria-label="Player Identity Roster">
+              <div class="sidebar-header">
+                <div class="sb-title">
+                  <h2>Unique Track IDs</h2>
+                  <span class="player-count-badge" id="roster-count">0</span>
+                </div>
+                <!-- Search & Filter -->
+                <div class="search-wrap">
+                  <input type="text" id="player-search" class="search-input" placeholder="Filter by tag (e.g. P01) or ID…" aria-label="Filter players">
+                </div>
+                <div class="filter-chips">
+                  <button class="chip-filter active" data-filter="sustained" type="button">Sustained (<span id="filter-sustained-count">0</span>)</button>
+                  <button class="chip-filter" data-filter="calibrated" type="button">Calibrated (<span id="filter-calib-count">0</span>)</button>
+                  <button class="chip-filter" data-filter="all" type="button">All (<span id="filter-all-count">0</span>)</button>
+                  <button class="chip-filter" data-filter="transient" type="button">Transient (<span id="filter-transient-count">0</span>)</button>
+                </div>
+              </div>
+
+              <!-- Selected Player Mini Summary -->
+              <div class="selected-player-summary" id="sb-selected-summary">
+                <div class="sp-badge-wrap">
+                  <span class="player-color-dot large" id="sb-dot"></span>
+                  <div class="sp-text">
+                    <strong id="sb-tag">P01</strong>
+                    <span id="sb-meta">ID 1 · Active</span>
+                  </div>
+                </div>
+                <div class="sp-quick-stats">
+                  <div>
+                    <span class="sp-lbl">Distance</span>
+                    <strong id="sb-dist">— m</strong>
+                  </div>
+                  <div>
+                    <span class="sp-lbl">Top Speed</span>
+                    <strong id="sb-speed">— km/h</strong>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Scrollable Player List -->
+              <div class="player-roster" id="player-roster" role="listbox" aria-label="Tracked Players List">
+                <!-- Populated dynamically via JS -->
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

@@ -29,6 +29,7 @@ from courtvision.utils.video import (
     calculate_pairwise_ious,
     create_video_writer,
     draw_tracks,
+    finalize_video_for_web,
     get_video_metadata,
 )
 
@@ -104,6 +105,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.8,
         help="ByteTrack matching threshold (default: 0.8)",
+    )
+    parser.add_argument(
+        "--min-consecutive-frames",
+        type=int,
+        default=2,
+        help="ByteTrack track confirmation minimum consecutive frames (default: 2)",
     )
     parser.add_argument(
         "--trail-length",
@@ -285,6 +292,7 @@ def main() -> None:
             lost_track_buffer=args.track_buffer,
             minimum_matching_threshold=args.match_thresh,
             frame_rate=int(round(metadata.fps)),
+            minimum_consecutive_frames=args.min_consecutive_frames,
             homography=homography,
             trail_length=args.trail_length,
         )
@@ -292,7 +300,8 @@ def main() -> None:
         annotated_filename = "bytetrack_annotated.mp4"
         print(
             f"Tracker:          ByteTrack (activation={args.track_thresh}, "
-            f"buffer={args.track_buffer}f, match={args.match_thresh})"
+            f"buffer={args.track_buffer}f, match={args.match_thresh}, "
+            f"min_consecutive={args.min_consecutive_frames})"
         )
 
     # 5. Video Writer Initialization
@@ -438,6 +447,9 @@ def main() -> None:
         cap.release()
         if video_writer is not None:
             video_writer.release()
+            if not args.no_video:
+                print("Finalizing video encoding for web playback (H.264/yuv420p)...")
+                finalize_video_for_web(annotated_video_path)
 
     pipeline_total_time = time.perf_counter() - pipeline_start_time
     effective_fps = frame_idx / pipeline_total_time if pipeline_total_time > 0 else 0.0
@@ -519,7 +531,12 @@ def main() -> None:
 
     # 13. Physical Metrics & Heatmaps
     print("\nComputing physical metrics and heatmaps...")
-    metrics_map = compute_player_metrics(all_tracked_players, fps=metadata.fps)
+    metrics_map = compute_player_metrics(
+        all_tracked_players,
+        fps=metadata.fps,
+        max_plausible_speed_kmh=38.0,
+        smooth_window=5,
+    )
     metrics_list = metrics_to_json_list(metrics_map)
 
     physical_metrics_json_path = output_dir / "player_physical_metrics.json"
@@ -534,6 +551,9 @@ def main() -> None:
             "distance_km",
             "avg_speed_kmh",
             "top_speed_kmh",
+            "max_raw_speed_kmh",
+            "max_acceleration_ms2",
+            "outlier_count",
             "sprint_count",
             "sprint_threshold_kmh",
             "sprint_min_duration_s",
@@ -544,7 +564,7 @@ def main() -> None:
             "time_span_s",
         ]
         with open(physical_metrics_csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(metrics_list)
     print(f"Saved player metrics CSV:       {physical_metrics_csv_path}")
@@ -557,6 +577,26 @@ def main() -> None:
     # 14. Compile and Save Tracking Metadata
     track_stats = tracker.get_track_statistics()
     metadata_path = output_dir / "tracking_metadata.json"
+
+    # Frame-by-frame simultaneous track counts and track duration distributions
+    frame_track_counts: Dict[int, Set[int]] = {}
+    track_durations: Dict[int, int] = {}
+    for t in all_tracks:
+        f_i = t["frame"]
+        t_i = t["track_id"]
+        frame_track_counts.setdefault(f_i, set()).add(t_i)
+        track_durations[t_i] = track_durations.get(t_i, 0) + 1
+
+    simul_counts = [len(s) for s in frame_track_counts.values()]
+    peak_simultaneous = max(simul_counts) if simul_counts else 0
+    avg_simultaneous = float(np.mean(simul_counts)) if simul_counts else 0.0
+    sustained_tracks = sum(1 for d in track_durations.values() if d >= 15)
+    transient_tracks = sum(1 for d in track_durations.values() if d < 15)
+    total_outliers = sum(m.outlier_count for m in metrics_map.values())
+    raw_spikes = [m.max_raw_speed_kmh for m in metrics_map.values() if m.max_raw_speed_kmh is not None]
+    max_raw_spike = max(raw_spikes) if raw_spikes else 0.0
+    validated_top_speeds = [m.top_speed_kmh for m in metrics_map.values() if m.top_speed_kmh is not None]
+    max_validated_speed = max(validated_top_speeds) if validated_top_speeds else 0.0
 
     tracking_metadata: Dict[str, Any] = {
         "pipeline_version": "0.2.0",
@@ -583,9 +623,16 @@ def main() -> None:
         },
         "physical_analytics": {
             "total_tracked_players": len(metrics_map),
+            "peak_simultaneous_tracks": peak_simultaneous,
+            "avg_simultaneous_tracks": round(avg_simultaneous, 1),
+            "sustained_tracks_count": sustained_tracks,
+            "transient_tracks_count": transient_tracks,
             "players_with_calibrated_metrics": sum(1 for m in metrics_map.values() if m.valid_samples >= 2),
             "calibrated_zone_covered": homography._is_full_pitch if homography else False,
             "calibration_scope": homography.get_metadata().get("calibration_scope") if homography else "none",
+            "total_outliers_rejected": total_outliers,
+            "max_raw_spike_kmh": round(max_raw_spike, 1),
+            "max_validated_speed_kmh": round(max_validated_speed, 1),
         },
         "hardware": {
             "device": detector.device,

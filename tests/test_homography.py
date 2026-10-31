@@ -79,3 +79,42 @@ def test_homography_metadata():
     assert meta["full_pitch_calibration"] is False
     assert meta["pitch_dimensions_m"] == [105.0, 68.0]
     assert "warning" in meta
+
+
+def test_calibrated_zone_strict_bounds_and_no_leakage():
+    """Consistency audit test: zero out-of-bounds leakage for calibrated region.
+
+    Declared calibrated region for legacy homography:
+    X in [0.0, 16.5] m, Y in [13.84, 54.16] m.
+    Observations outside must strictly return False.
+    """
+    homography = PitchHomography("data/homography_matrix.json")
+
+    # The two specific reported false-calibrated observations:
+    # Frame 0, P05: (7.41, 56.33) -> Y > 54.16
+    assert homography.is_within_calibrated_zone(7.41, 56.33) is False
+    # Frame 100, P01: (13.07, 57.33) -> Y > 54.16
+    assert homography.is_within_calibrated_zone(13.07, 57.33) is False
+
+    # Negative X (behind goal line)
+    assert homography.is_within_calibrated_zone(-0.5, 34.0) is False
+    assert homography.is_within_calibrated_zone(-2.2, 50.0) is False
+
+    # X beyond penalty area (depth > 16.5m)
+    assert homography.is_within_calibrated_zone(16.51, 34.0) is False
+    assert homography.is_within_calibrated_zone(20.0, 34.0) is False
+
+    # Y outside lateral penalty area width (width 40.32m: [13.84, 54.16])
+    assert homography.is_within_calibrated_zone(8.0, 13.83) is False
+    assert homography.is_within_calibrated_zone(8.0, 54.17) is False
+    assert homography.is_within_calibrated_zone(8.0, 10.0) is False
+    assert homography.is_within_calibrated_zone(8.0, 60.0) is False
+
+    # Valid points inside the 18-yard box
+    assert homography.is_within_calibrated_zone(0.0, 13.84) is True
+    assert homography.is_within_calibrated_zone(16.5, 13.84) is True
+    assert homography.is_within_calibrated_zone(0.0, 54.16) is True
+    assert homography.is_within_calibrated_zone(16.5, 54.16) is True
+    assert homography.is_within_calibrated_zone(8.0, 34.0) is True
+    assert homography.is_within_calibrated_zone(11.0, 34.0) is True  # Penalty spot
+

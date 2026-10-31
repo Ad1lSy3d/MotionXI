@@ -149,7 +149,8 @@ def test_invalid_observations_are_excluded_from_metrics():
         _obs(frame=2, track_id=7, pitch_x=99.0, pitch_y=99.0, projection_valid=False, fps=fps),
         _obs(frame=3, track_id=7, pitch_x=5.0, pitch_y=0.0, fps=fps),
     ]
-    result = compute_player_metrics(obs, fps=fps)
+    # Pass max_plausible_speed_kmh=None because this test specifically uses synthetic coordinates with 225 km/h
+    result = compute_player_metrics(obs, fps=fps, max_plausible_speed_kmh=None)
 
     m = result[7]
     assert m.valid_samples == 2
@@ -309,7 +310,8 @@ def test_multiple_players_metrics_are_independent():
         _obs(frame=0, track_id=2, pitch_x=0.0, pitch_y=0.0, fps=fps),
         _obs(frame=25, track_id=2, pitch_x=20.0, pitch_y=0.0, fps=fps),
     ]
-    result = compute_player_metrics(obs, fps=fps)
+    # Pass max_plausible_speed_kmh=None because Player B moves at synthetic 72 km/h
+    result = compute_player_metrics(obs, fps=fps, max_plausible_speed_kmh=None)
 
     assert 1 in result
     assert 2 in result
@@ -435,3 +437,130 @@ def test_metrics_to_json_list_sorted_by_track_id():
     ids = [entry["track_id"] for entry in as_list]
     assert ids == sorted(ids)
     assert ids == [10, 20, 30]
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Implausible speed spikes flagged as outliers
+# ---------------------------------------------------------------------------
+
+
+def test_implausible_speed_spikes_flagged_as_outliers():
+    """
+    Player moves normally at 18 km/h for 3 frames, then suffers a single-frame
+    600 km/h jitter jump, then resumes normal movement.
+    The 600 km/h jump must be flagged as an outlier, excluded from distance,
+    and the top speed must remain within plausible bounds.
+    """
+    fps = 30.0
+    dt = 1.0 / fps
+    normal_dx = 5.0 * dt  # 5 m/s = 18 km/h
+    obs = [
+        _obs(frame=0, track_id=48, pitch_x=0.0, pitch_y=0.0, fps=fps),
+        _obs(frame=1, track_id=48, pitch_x=normal_dx, pitch_y=0.0, fps=fps),
+        _obs(frame=2, track_id=48, pitch_x=normal_dx * 2, pitch_y=0.0, fps=fps),
+        # Outlier jitter jump: +5.5m in 1 frame -> 165 m/s = 594 km/h!
+        _obs(frame=3, track_id=48, pitch_x=normal_dx * 2 + 5.5, pitch_y=0.0, fps=fps),
+        # Recovery back
+        _obs(frame=4, track_id=48, pitch_x=normal_dx * 3, pitch_y=0.0, fps=fps),
+    ]
+
+    result = compute_player_metrics(obs, fps=fps, max_plausible_speed_kmh=38.0)
+    m = result[48]
+
+    assert m.outlier_count >= 1
+    assert m.max_raw_speed_kmh > 100.0  # Raw spike is recorded
+    assert m.top_speed_kmh <= 38.0  # Validated top speed respects physical boundary
+    assert len(m.outlier_events) >= 1
+    assert "exceeds physical threshold" in m.outlier_events[0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Moving average speed smoothing
+# ---------------------------------------------------------------------------
+
+
+def test_moving_average_speed_smoothing():
+    """
+    Ensure 5-frame moving average smoothing smooths instantaneous variations.
+    """
+    fps = 25.0
+    # Alternating 10 km/h and 30 km/h steps
+    obs = []
+    x = 0.0
+    for f in range(10):
+        spd = 10.0 if f % 2 == 0 else 30.0
+        x += (spd / 3.6) / fps
+        obs.append(_obs(frame=f, track_id=50, pitch_x=x, pitch_y=0.0, fps=fps))
+
+    result = compute_player_metrics(obs, fps=fps, smooth_window=5)
+    m = result[50]
+
+    assert m.avg_speed_kmh == pytest.approx(20.0, abs=2.0)
+    # With 5-frame smoothing, top speed should be smoothed below raw 30 km/h peak
+    assert m.top_speed_kmh < 30.0
+
+
+# ---------------------------------------------------------------------------
+# Test 15: Acceleration computation
+# ---------------------------------------------------------------------------
+
+
+def test_acceleration_computed_between_smoothed_speeds():
+    fps = 25.0
+    # Accelerating from 0 to 20 km/h linearly
+    obs = []
+    x = 0.0
+    v = 0.0
+    for f in range(25):
+        v += 0.5  # acceleration
+        x += (v / 3.6) / fps
+        obs.append(_obs(frame=f, track_id=60, pitch_x=x, pitch_y=0.0, fps=fps))
+
+    result = compute_player_metrics(obs, fps=fps)
+    m = result[60]
+
+    assert m.max_acceleration_ms2 is not None
+    assert m.max_acceleration_ms2 > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 16: Uncalibrated gaps do not accumulate artificial displacement
+# ---------------------------------------------------------------------------
+
+
+def test_uncalibrated_gap_does_not_accumulate_artificial_displacement():
+    """
+    Player is in calibrated zone at frame 10: (5.0, 20.0).
+    Player is in calibrated zone at frame 11: (5.2, 20.0) -> dist = 0.2 m.
+    Player leaves calibrated zone:
+      Frame 12: in_calibrated_zone=False at (17.5, 20.0).
+      Frame 13: in_calibrated_zone=False at (20.0, 20.0).
+    Player re-enters calibrated zone:
+      Frame 14: in_calibrated_zone=True at (6.0, 20.0).
+      Frame 15: in_calibrated_zone=True at (6.3, 20.0) -> dist = 0.3 m.
+
+    Expected total distance: 0.2 + 0.3 = 0.5 m.
+    The jump between Frame 11 (5.2, 20.0) and Frame 14 (6.0, 20.0) MUST NOT be bridged
+    across the uncalibrated gap!
+    """
+    fps = 25.0
+    obs = [
+        _obs(frame=10, track_id=70, pitch_x=5.0, pitch_y=20.0, in_calibrated_zone=True, fps=fps),
+        _obs(frame=11, track_id=70, pitch_x=5.2, pitch_y=20.0, in_calibrated_zone=True, fps=fps),
+        _obs(frame=12, track_id=70, pitch_x=17.5, pitch_y=20.0, in_calibrated_zone=False, fps=fps),
+        _obs(frame=13, track_id=70, pitch_x=20.0, pitch_y=20.0, in_calibrated_zone=False, fps=fps),
+        _obs(frame=14, track_id=70, pitch_x=6.0, pitch_y=20.0, in_calibrated_zone=True, fps=fps),
+        _obs(frame=15, track_id=70, pitch_x=6.3, pitch_y=20.0, in_calibrated_zone=True, fps=fps),
+    ]
+
+    result = compute_player_metrics(obs, fps=fps)
+    m = result[70]
+
+    # Valid samples = 4 (frames 10, 11, 14, 15)
+    assert m.valid_samples == 4
+    assert m.total_samples == 6
+    # Distance must be exactly 0.2 + 0.3 = 0.5 m (0.0005 km)
+    # If the gap between 11 and 14 was bridged, it would have added 0.8 m -> 1.3 m!
+    assert m.distance_km == pytest.approx(0.0005, abs=1e-5)
+
+
