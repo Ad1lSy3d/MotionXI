@@ -149,6 +149,33 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round
   transition: background 0.3s;
 }
 .status-indicator.ready { background: var(--green); box-shadow: 0 0 8px rgba(34, 197, 94, 0.4); }
+.rail-status {
+  margin-top: 28px;
+  padding: 0 4px;
+}
+.rail-status-heading {
+  margin: 0 0 8px 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.rail-status ul { display: flex; flex-direction: column; gap: 4px; }
+.rail-status-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 4px;
+  border-radius: 6px;
+}
+.rail-status-item > .status-indicator { justify-self: center; }
+.rail-status-copy { display: flex; min-width: 0; flex-direction: column; line-height: 1.35; }
+.rail-status-name { color: var(--muted); font-size: 11px; }
+.rail-status-value { color: var(--ink); font-size: 11px; font-weight: 600; overflow-wrap: anywhere; }
+.rail-status-count { color: var(--ink); font-size: 11px; font-weight: 700; text-align: center; }
 
 /* Main Content Area */
 main {
@@ -187,21 +214,6 @@ main {
   pointer-events: none;
 }
 .hero-inner { position: relative; max-width: 720px; animation: rise 0.5s var(--ease) both; }
-
-.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-.chips li {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  color: var(--muted);
-  font-size: 12px;
-}
-.chips b { color: var(--ink); font-weight: 600; }
-.chip-demo { border-color: rgba(34, 197, 94, 0.3) !important; background: rgba(34, 197, 94, 0.08) !important; }
 
 h1 {
   font-size: clamp(32px, 4.5vw, 48px);

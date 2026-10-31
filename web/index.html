@@ -29,6 +29,39 @@
         </a>
       </nav>
 
+      <section class="rail-status" aria-label="System readiness">
+        <h2 class="rail-status-heading label">System Status</h2>
+        <ul>
+          <li class="rail-status-item">
+            <span class="status-indicator" id="model-indicator"></span>
+            <span class="rail-status-copy">
+              <span class="rail-status-name label">Detector</span>
+              <b class="rail-status-value label" id="model-status">Checking…</b>
+            </span>
+          </li>
+          <li class="rail-status-item">
+            <span class="status-indicator" id="homography-indicator"></span>
+            <span class="rail-status-copy">
+              <span class="rail-status-name label">Pitch Calibration</span>
+              <b class="rail-status-value label" id="homography-status">Checking…</b>
+            </span>
+          </li>
+          <li class="rail-status-item">
+            <span class="rail-status-count" id="video-count">—</span>
+            <span class="rail-status-copy">
+              <span class="rail-status-name label">Match Videos</span>
+            </span>
+          </li>
+          <li class="rail-status-item" id="demo-chip" hidden>
+            <span class="status-indicator ready"></span>
+            <span class="rail-status-copy">
+              <span class="rail-status-name label">Demo Match</span>
+              <b class="rail-status-value label">Ready</b>
+            </span>
+          </li>
+        </ul>
+      </section>
+
       <div class="rail-footer">
         <div class="rail-note">
           <span class="status-indicator ready" id="global-status-dot"></span>
@@ -42,12 +75,6 @@
       <section data-view="home" aria-labelledby="hero-title">
         <div class="hero">
           <div class="hero-inner">
-            <ul class="chips" aria-label="System readiness">
-              <li><span class="status-indicator" id="model-indicator"></span>Detector <b id="model-status">Checking…</b></li>
-              <li><span class="status-indicator" id="homography-indicator"></span>Pitch Calibration <b id="homography-status">Checking…</b></li>
-              <li><b id="video-count">—</b> Match Videos</li>
-              <li id="demo-chip" class="chip-demo" hidden><span class="status-indicator ready"></span>Demo Match <b>Ready</b></li>
-            </ul>
             <span id="model-detail" hidden></span>
 
             <h1 id="hero-title">Choose a video</h1>
