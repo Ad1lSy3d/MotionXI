@@ -81,3 +81,31 @@ def test_detector_inference_on_synthetic_frame():
     assert isinstance(dets, list)
     assert isinstance(infer_ms, float)
     assert infer_ms >= 0.0
+
+
+def test_frame_439_nested_duplicate_suppressed():
+    """Verify that the Frame 439 P61/P78 duplicate detection is eliminated."""
+    from courtvision.detection.detector import suppress_contained_duplicates
+
+    # Ground truth detection coordinates from Frame 439
+    p61_box = Detection.create(439, 14.63, 0, "player", 0.77, 347.9, 434.2, 455.3, 660.6)
+    p78_duplicate = Detection.create(439, 14.63, 0, "player", 0.61, 372.4, 526.1, 448.7, 674.5)
+
+    raw_dets = [p61_box, p78_duplicate]
+    cleaned = suppress_contained_duplicates(raw_dets)
+
+    assert len(cleaned) == 1, "The nested duplicate P78 detection must be suppressed"
+    assert cleaned[0].confidence == pytest.approx(0.77), "The full-body detection (P61) must be preserved"
+    assert cleaned[0].y1 == pytest.approx(434.2)
+
+
+def test_legitimate_overlapping_players_preserved():
+    """Verify that separate players with distinct centers and comparable areas are NOT suppressed."""
+    from courtvision.detection.detector import suppress_contained_duplicates
+
+    # Two players crossing paths: comparable sizes, different horizontal centers
+    p1 = Detection.create(100, 3.33, 0, "player", 0.88, 500.0, 400.0, 560.0, 600.0)
+    p2 = Detection.create(100, 3.33, 0, "player", 0.84, 535.0, 410.0, 595.0, 605.0)
+
+    cleaned = suppress_contained_duplicates([p1, p2])
+    assert len(cleaned) == 2, "Both legitimate overlapping players must survive"

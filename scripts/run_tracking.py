@@ -13,22 +13,30 @@ import cv2
 import numpy as np
 import torch
 
+from courtvision.analytics import (
+    compute_player_metrics,
+    generate_all_heatmaps,
+    export_heatmaps_to_directory,
+)
+from courtvision.analytics.metrics import metrics_to_json_list
 from courtvision.detection.detector import PlayerDetector
 from courtvision.projection.homography import PitchHomography
 from courtvision.tracking.bytetrack_tracker import FootballByteTracker
+from courtvision.tracking.kmt_tracker import KinematicMemoryTracker
 from courtvision.tracking.track_types import TrackedPlayer
 from courtvision.utils.video import (
     VideoMetadata,
     calculate_pairwise_ious,
     create_video_writer,
     draw_tracks,
+    finalize_video_for_web,
     get_video_metadata,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="CourtVision AI - Milestone 2: YOLOv11m + ByteTrack Baseline Pipeline"
+        description="CourtVision AI - YOLOv11m player tracking (ByteTrack baseline or KMT)"
     )
     parser.add_argument(
         "--video",
@@ -99,15 +107,39 @@ def parse_args() -> argparse.Namespace:
         help="ByteTrack matching threshold (default: 0.8)",
     )
     parser.add_argument(
+        "--min-consecutive-frames",
+        type=int,
+        default=2,
+        help="ByteTrack track confirmation minimum consecutive frames (default: 2)",
+    )
+    parser.add_argument(
         "--trail-length",
         type=int,
         default=15,
         help="Visualization trail history length in frames (default: 15)",
     )
     parser.add_argument(
+        "--tracker",
+        choices=("bytetrack", "kmt"),
+        default="bytetrack",
+        help="Tracker implementation to use (default: bytetrack)",
+    )
+    parser.add_argument(
+        "--camera-motion",
+        action="store_true",
+        default=False,
+        help="Enable affine camera-motion compensation for KMT (default: False)",
+    )
+    parser.add_argument(
         "--no-video",
         action="store_true",
         help="Skip generating annotated video output",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Maximum number of frames to process (default: all frames)",
     )
     return parser.parse_args()
 
@@ -199,7 +231,14 @@ def main() -> None:
     diag_dir.mkdir(parents=True, exist_ok=True)
 
     print("==================================================")
-    print("COURTVISION AI: MILESTONE 2 BYTETRACK BASELINE")
+    print(
+        "COURTVISION AI: "
+        + (
+            "MILESTONE 2 BYTETRACK BASELINE"
+            if args.tracker == "bytetrack"
+            else "MILESTONE 4 KINEMATIC MEMORY TRACKER"
+        )
+    )
     print("==================================================")
     print(f"Input Video:      {video_path}")
     print(f"Model Checkpoint: {weights_path}")
@@ -231,19 +270,42 @@ def main() -> None:
     )
     print(f"Detector Device:  {detector.device.upper()}")
 
-    # 4. ByteTrack Baseline Initialization
-    tracker = FootballByteTracker(
-        track_activation_threshold=args.track_thresh,
-        lost_track_buffer=args.track_buffer,
-        minimum_matching_threshold=args.match_thresh,
-        frame_rate=int(round(metadata.fps)),
-        homography=homography,
-        trail_length=args.trail_length,
-    )
-    print(f"Tracker:          ByteTrack (activation={args.track_thresh}, buffer={args.track_buffer}f, match={args.match_thresh})")
+    # 4. Tracker Initialization
+    if args.tracker == "kmt":
+        tracker = KinematicMemoryTracker(
+            homography=homography,
+            trail_length=args.trail_length,
+            enable_camera_motion=args.camera_motion,
+        )
+        tracker_name = "KMT"
+        annotated_filename = "kmt_annotated.mp4"
+        print(
+            "Tracker:          Kinematic Memory Tracker "
+            f"(cluster IoU={tracker.cluster_iou_threshold}, "
+            f"ghost={tracker.min_ghost_frames}-{tracker.max_ghost_frames}f, "
+            f"speed gate={tracker.max_implied_speed_px_per_frame}px/frame, "
+            f"CMC={args.camera_motion})"
+        )
+    else:
+        tracker = FootballByteTracker(
+            track_activation_threshold=args.track_thresh,
+            lost_track_buffer=args.track_buffer,
+            minimum_matching_threshold=args.match_thresh,
+            frame_rate=int(round(metadata.fps)),
+            minimum_consecutive_frames=args.min_consecutive_frames,
+            homography=homography,
+            trail_length=args.trail_length,
+        )
+        tracker_name = "ByteTrack"
+        annotated_filename = "bytetrack_annotated.mp4"
+        print(
+            f"Tracker:          ByteTrack (activation={args.track_thresh}, "
+            f"buffer={args.track_buffer}f, match={args.match_thresh}, "
+            f"min_consecutive={args.min_consecutive_frames})"
+        )
 
     # 5. Video Writer Initialization
-    annotated_video_path = output_dir / "bytetrack_annotated.mp4"
+    annotated_video_path = output_dir / annotated_filename
     video_writer = None
     if not args.no_video:
         video_writer = create_video_writer(
@@ -260,6 +322,7 @@ def main() -> None:
         raise RuntimeError(f"Failed to open video file: {video_path}")
 
     all_tracks: List[Dict[str, Any]] = []
+    all_tracked_players: List[TrackedPlayer] = []
     crowded_frames: List[Dict[str, Any]] = []
     id_switch_candidates: List[Dict[str, Any]] = []
 
@@ -277,6 +340,10 @@ def main() -> None:
 
     try:
         while True:
+            if args.max_frames is not None and frame_idx >= args.max_frames:
+                print(f"Reached user-specified limit of {args.max_frames} frames.")
+                break
+
             frame_start = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
@@ -293,16 +360,25 @@ def main() -> None:
             )
             detector_times_ms.append(infer_ms)
 
-            # 2. ByteTrack Association
-            tracks, track_ms = tracker.update(
-                detections=detections,
-                frame_idx=frame_idx,
-                fps=metadata.fps,
-            )
+            # 2. Association
+            if isinstance(tracker, KinematicMemoryTracker):
+                tracks, track_ms = tracker.update(
+                    detections=detections,
+                    frame_idx=frame_idx,
+                    fps=metadata.fps,
+                    frame=frame,
+                )
+            else:
+                tracks, track_ms = tracker.update(
+                    detections=detections,
+                    frame_idx=frame_idx,
+                    fps=metadata.fps,
+                )
             tracker_times_ms.append(track_ms)
 
             # 3. Store Track Records
             current_active_ids = set()
+            all_tracked_players.extend(tracks)
             for t in tracks:
                 all_tracks.append(t.to_dict())
                 current_active_ids.add(t.track_id)
@@ -344,6 +420,7 @@ def main() -> None:
                 track_ms=track_ms,
                 total_unique_ids=total_unique_so_far,
                 device_name=detector.device,
+                tracker_name=tracker_name,
             )
 
             # Cache frame for potential diagnostic snapshot
@@ -370,6 +447,9 @@ def main() -> None:
         cap.release()
         if video_writer is not None:
             video_writer.release()
+            if not args.no_video:
+                print("Finalizing video encoding for web playback (H.264/yuv420p)...")
+                finalize_video_for_web(annotated_video_path)
 
     pipeline_total_time = time.perf_counter() - pipeline_start_time
     effective_fps = frame_idx / pipeline_total_time if pipeline_total_time > 0 else 0.0
@@ -449,13 +529,82 @@ def main() -> None:
             writer.writeheader()
     print(f"Saved ID switch candidates CSV: {id_switch_csv_path}")
 
-    # 13. Compile and Save Tracking Metadata
+    # 13. Physical Metrics & Heatmaps
+    print("\nComputing physical metrics and heatmaps...")
+    metrics_map = compute_player_metrics(
+        all_tracked_players,
+        fps=metadata.fps,
+        max_plausible_speed_kmh=38.0,
+        smooth_window=5,
+    )
+    metrics_list = metrics_to_json_list(metrics_map)
+
+    physical_metrics_json_path = output_dir / "player_physical_metrics.json"
+    with open(physical_metrics_json_path, "w") as f:
+        json.dump(metrics_list, f, indent=2)
+    print(f"Saved player metrics JSON:      {physical_metrics_json_path}")
+
+    physical_metrics_csv_path = output_dir / "player_physical_metrics.csv"
+    if metrics_list:
+        fieldnames = [
+            "track_id",
+            "distance_km",
+            "avg_speed_kmh",
+            "top_speed_kmh",
+            "max_raw_speed_kmh",
+            "max_acceleration_ms2",
+            "outlier_count",
+            "sprint_count",
+            "sprint_threshold_kmh",
+            "sprint_min_duration_s",
+            "valid_samples",
+            "total_samples",
+            "coverage_ratio",
+            "occlusion_gaps",
+            "time_span_s",
+        ]
+        with open(physical_metrics_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(metrics_list)
+    print(f"Saved player metrics CSV:       {physical_metrics_csv_path}")
+
+    heatmaps_dir = output_dir / "heatmaps"
+    heatmaps = generate_all_heatmaps(all_tracked_players)
+    heatmap_exports = export_heatmaps_to_directory(heatmaps, heatmaps_dir)
+    print(f"Saved {len(heatmap_exports)} heatmaps to:         {heatmaps_dir}")
+
+    # 14. Compile and Save Tracking Metadata
     track_stats = tracker.get_track_statistics()
     metadata_path = output_dir / "tracking_metadata.json"
 
+    # Frame-by-frame simultaneous track counts and track duration distributions
+    frame_track_counts: Dict[int, Set[int]] = {}
+    track_durations: Dict[int, int] = {}
+    for t in all_tracks:
+        f_i = t["frame"]
+        t_i = t["track_id"]
+        frame_track_counts.setdefault(f_i, set()).add(t_i)
+        track_durations[t_i] = track_durations.get(t_i, 0) + 1
+
+    simul_counts = [len(s) for s in frame_track_counts.values()]
+    peak_simultaneous = max(simul_counts) if simul_counts else 0
+    avg_simultaneous = float(np.mean(simul_counts)) if simul_counts else 0.0
+    sustained_tracks = sum(1 for d in track_durations.values() if d >= 15)
+    transient_tracks = sum(1 for d in track_durations.values() if d < 15)
+    total_outliers = sum(m.outlier_count for m in metrics_map.values())
+    raw_spikes = [m.max_raw_speed_kmh for m in metrics_map.values() if m.max_raw_speed_kmh is not None]
+    max_raw_spike = max(raw_spikes) if raw_spikes else 0.0
+    validated_top_speeds = [m.top_speed_kmh for m in metrics_map.values() if m.top_speed_kmh is not None]
+    max_validated_speed = max(validated_top_speeds) if validated_top_speeds else 0.0
+
     tracking_metadata: Dict[str, Any] = {
         "pipeline_version": "0.2.0",
-        "milestone": "Milestone 2: ByteTrack Baseline",
+        "milestone": (
+            "Milestone 2: ByteTrack Baseline"
+            if args.tracker == "bytetrack"
+            else "Milestone 4: Kinematic Memory Tracker"
+        ),
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "detector": {
             "model": "YOLOv11m",
@@ -471,6 +620,19 @@ def main() -> None:
             "enabled": False,
             "calibration_scope": "none",
             "full_pitch_calibration": False,
+        },
+        "physical_analytics": {
+            "total_tracked_players": len(metrics_map),
+            "peak_simultaneous_tracks": peak_simultaneous,
+            "avg_simultaneous_tracks": round(avg_simultaneous, 1),
+            "sustained_tracks_count": sustained_tracks,
+            "transient_tracks_count": transient_tracks,
+            "players_with_calibrated_metrics": sum(1 for m in metrics_map.values() if m.valid_samples >= 2),
+            "calibrated_zone_covered": homography._is_full_pitch if homography else False,
+            "calibration_scope": homography.get_metadata().get("calibration_scope") if homography else "none",
+            "total_outliers_rejected": total_outliers,
+            "max_raw_spike_kmh": round(max_raw_spike, 1),
+            "max_validated_speed_kmh": round(max_validated_speed, 1),
         },
         "hardware": {
             "device": detector.device,
@@ -505,6 +667,9 @@ def main() -> None:
             "track_summary_csv": str(summary_csv_path),
             "crowded_frames_csv": str(crowded_csv_path),
             "id_switch_candidates_csv": str(id_switch_csv_path),
+            "physical_metrics_csv": str(physical_metrics_csv_path),
+            "physical_metrics_json": str(physical_metrics_json_path),
+            "heatmaps_dir": str(heatmaps_dir),
             "diagnostics_dir": str(diag_dir),
         },
     }
@@ -514,7 +679,12 @@ def main() -> None:
     print(f"Saved tracking metadata JSON:   {metadata_path}")
 
     print("\n==================================================")
-    print("BYTETRACK BASELINE RUN SUMMARY")
+    summary_title = (
+        "BYTETRACK BASELINE RUN SUMMARY"
+        if args.tracker == "bytetrack"
+        else "KMT RUN SUMMARY"
+    )
+    print(summary_title)
     print("==================================================")
     print(f"Decoded Frames:         {frame_idx} (Container reported: {metadata.container_frame_count})")
     print(f"Total Unique Tracks:    {track_stats['total_unique_track_ids']}")
@@ -525,6 +695,14 @@ def main() -> None:
     print(f"Max Active Tracks/Frame:{track_stats['maximum_active_tracks_per_frame']}")
     print(f"Total Track Records:    {len(all_tracks)}")
     print(f"Heuristic IDSw Events:  {len(id_switch_candidates)}")
+    calibrated_players = [m for m in metrics_map.values() if m.valid_samples >= 2]
+    max_dist = max((m.distance_km for m in calibrated_players), default=0.0)
+    top_spd = max((m.top_speed_kmh for m in calibrated_players if m.top_speed_kmh is not None), default=0.0)
+    print("--------------------------------------------------")
+    print(f"Calibrated Tracks:      {len(calibrated_players)}/{len(metrics_map)} in zone")
+    print(f"Max Calibrated Distance:{max_dist:.3f} km ({max_dist * 1000.0:.1f} m)")
+    print(f"Top Calibrated Speed:   {top_spd:.1f} km/h")
+    print(f"Heatmaps Exported:      {len(heatmap_exports)} ({heatmaps_dir})")
     print("--------------------------------------------------")
     print(f"Detector Inference Avg: {avg_infer_ms:.2f} ms/frame")
     print(f"Tracker Association Avg:{avg_track_ms:.2f} ms/frame")

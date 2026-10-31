@@ -24,6 +24,7 @@ class FootballByteTracker:
         lost_track_buffer: int = 30,
         minimum_matching_threshold: float = 0.8,
         frame_rate: int = 30,
+        minimum_consecutive_frames: int = 2,
         homography: Optional[PitchHomography] = None,
         trail_length: int = 15,
     ) -> None:
@@ -31,6 +32,7 @@ class FootballByteTracker:
         self.lost_track_buffer = lost_track_buffer
         self.minimum_matching_threshold = minimum_matching_threshold
         self.frame_rate = frame_rate
+        self.minimum_consecutive_frames = minimum_consecutive_frames
         self.homography = homography
         self.trail_length = trail_length
 
@@ -39,6 +41,7 @@ class FootballByteTracker:
             lost_track_buffer=self.lost_track_buffer,
             minimum_matching_threshold=self.minimum_matching_threshold,
             frame_rate=self.frame_rate,
+            minimum_consecutive_frames=self.minimum_consecutive_frames,
         )
 
         # Track history and statistics storage
@@ -110,7 +113,7 @@ class FootballByteTracker:
 
                 if self.homography is not None:
                     px, py, proj_valid = self.homography.project_point(foot_x, foot_y)
-                    in_box = self.homography.is_within_calibrated_zone(px, py)
+                    in_box = self.homography.is_within_calibrated_zone(px, py, margin_meters=0.0)
                     pitch_x = round(px, 3) if not np.isnan(px) else None
                     pitch_y = round(py, 3) if not np.isnan(py) else None
 
@@ -204,5 +207,6 @@ class FootballByteTracker:
             "lost_track_buffer": self.lost_track_buffer,
             "minimum_matching_threshold": self.minimum_matching_threshold,
             "frame_rate": self.frame_rate,
+            "minimum_consecutive_frames": self.minimum_consecutive_frames,
             "trail_length": self.trail_length,
         }

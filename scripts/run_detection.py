@@ -19,6 +19,7 @@ from courtvision.utils.video import (
     VideoMetadata,
     create_video_writer,
     draw_detections,
+    finalize_video_for_web,
     get_video_metadata,
 )
 
@@ -172,7 +173,7 @@ def main() -> None:
                 record = d.to_dict()
                 if homography is not None:
                     px, py, is_valid = homography.project_point(d.foot_x, d.foot_y)
-                    in_box = homography.is_within_calibrated_zone(px, py)
+                    in_box = homography.is_within_calibrated_zone(px, py, margin_meters=0.0)
                     record["pitch_x"] = round(px, 3) if not np.isnan(px) else None
                     record["pitch_y"] = round(py, 3) if not np.isnan(py) else None
                     record["pitch_valid"] = bool(is_valid)
@@ -214,6 +215,9 @@ def main() -> None:
         cap.release()
         if video_writer is not None:
             video_writer.release()
+            if not args.no_video:
+                print("Finalizing video encoding for web playback (H.264/yuv420p)...")
+                finalize_video_for_web(annotated_video_path)
 
     pipeline_total_time = time.perf_counter() - pipeline_start_time
     effective_fps = frame_idx / pipeline_total_time if pipeline_total_time > 0 else 0.0

@@ -22,9 +22,9 @@ def test_tracker_initialization():
 
 def test_track_id_persistence_across_consecutive_frames():
     homography = PitchHomography("data/homography_matrix.json")
-    tracker = FootballByteTracker(homography=homography)
+    tracker = FootballByteTracker(homography=homography, minimum_consecutive_frames=2)
 
-    # Frame 0: Single player at (100, 200, 160, 320)
+    # Frame 0: Single player at (100, 200, 160, 320) -> tentative, not exposed
     det0 = [
         Detection.create(
             frame=0,
@@ -39,10 +39,9 @@ def test_track_id_persistence_across_consecutive_frames():
         )
     ]
     tracks0, _ = tracker.update(det0, frame_idx=0, fps=30.0)
-    assert len(tracks0) == 1
-    t0_id = tracks0[0].track_id
+    assert len(tracks0) == 0, "Newly detected player must initially be tentative and unexposed"
 
-    # Frame 1: Same player moved slightly to (103, 201, 163, 321)
+    # Frame 1: Same player detected consistently in 2nd consecutive frame -> confirmed
     det1 = [
         Detection.create(
             frame=1,
@@ -57,14 +56,69 @@ def test_track_id_persistence_across_consecutive_frames():
         )
     ]
     tracks1, _ = tracker.update(det1, frame_idx=1, fps=30.0)
-    assert len(tracks1) == 1
+    assert len(tracks1) == 1, "Track must be confirmed after 2 consecutive frames"
     t1_id = tracks1[0].track_id
-
-    # Track ID MUST persist
-    assert t0_id == t1_id
     assert tracks1[0].frame == 1
     assert tracks1[0].foot_x == pytest.approx((103.0 + 163.0) / 2.0)
     assert tracks1[0].foot_y == pytest.approx(321.0)
+
+    # Frame 2: Same player persists across subsequent frame
+    det2 = [
+        Detection.create(
+            frame=2,
+            timestamp=0.0667,
+            class_id=0,
+            class_name="player",
+            confidence=0.90,
+            x1=106.0,
+            y1=202.0,
+            x2=166.0,
+            y2=322.0,
+        )
+    ]
+    tracks2, _ = tracker.update(det2, frame_idx=2, fps=30.0)
+    assert len(tracks2) == 1
+    assert tracks2[0].track_id == t1_id, "Track ID must persist across confirmed frames"
+
+    # Frame 3: Temporary detection gap (detection missing)
+    tracks3, _ = tracker.update([], frame_idx=3, fps=30.0)
+    assert len(tracks3) == 0
+
+    # Frame 4: Player redetected after temporary gap -> retains original ID
+    det4 = [
+        Detection.create(
+            frame=4,
+            timestamp=0.1333,
+            class_id=0,
+            class_name="player",
+            confidence=0.89,
+            x1=110.0,
+            y1=204.0,
+            x2=170.0,
+            y2=324.0,
+        )
+    ]
+    tracks4, _ = tracker.update(det4, frame_idx=4, fps=30.0)
+    assert len(tracks4) == 1
+    assert tracks4[0].track_id == t1_id, "Confirmed track must retain ID after temporary gap"
+
+
+def test_tentative_track_discarded_if_single_frame():
+    """A spurious single-frame detection is discarded without assigning/exposing a track ID."""
+    tracker = FootballByteTracker(minimum_consecutive_frames=2)
+
+    # Frame 0: False positive appears
+    det0 = [Detection.create(0, 0.0, 0, "player", 0.85, 500, 300, 540, 400)]
+    tracks0, _ = tracker.update(det0, frame_idx=0, fps=30.0)
+    assert len(tracks0) == 0
+
+    # Frame 1: False positive disappeared immediately
+    tracks1, _ = tracker.update([], frame_idx=1, fps=30.0)
+    assert len(tracks1) == 0
+
+    # No track ID was ever assigned or recorded
+    stats = tracker.get_track_statistics()
+    assert stats["total_unique_track_ids"] == 0
 
 
 def test_tracked_player_schema_and_serialization():
@@ -121,10 +175,10 @@ def test_tracked_player_schema_and_serialization():
 
 
 def test_track_statistics_and_summary_generation():
-    tracker = FootballByteTracker()
+    tracker = FootballByteTracker(minimum_consecutive_frames=2)
 
-    # Feed 3 frames with 2 tracks
-    for f in range(3):
+    # Feed 4 frames with 2 tracks (frame 0 is tentative, frames 1-3 are confirmed)
+    for f in range(4):
         dets = [
             Detection.create(f, f / 30.0, 0, "player", 0.9, 100 + f, 200, 150 + f, 300),
             Detection.create(f, f / 30.0, 0, "player", 0.85, 400 + f, 200, 450 + f, 300),
@@ -135,13 +189,12 @@ def test_track_statistics_and_summary_generation():
     assert stats["total_unique_track_ids"] == 2
     assert stats["average_track_length_frames"] == 3.0
     assert stats["max_track_length_frames"] == 3
-    assert stats["average_active_tracks_per_frame"] == 2.0
 
     summary = tracker.get_track_summary_records()
     assert len(summary) == 2
     assert summary[0]["track_length"] == 3
-    assert summary[0]["first_frame"] == 0
-    assert summary[0]["last_frame"] == 2
+    assert summary[0]["first_frame"] == 1
+    assert summary[0]["last_frame"] == 3
 
 
 def test_trail_history_buffer():

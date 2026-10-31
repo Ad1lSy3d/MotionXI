@@ -28,6 +28,7 @@ import trackeval
 
 from courtvision.detection.detector import PlayerDetector
 from courtvision.tracking.bytetrack_tracker import FootballByteTracker
+from courtvision.tracking.kmt_tracker import KinematicMemoryTracker
 from courtvision.tracking.evaluation import (
     GroundTruthBox,
     TrackerBox,
@@ -43,7 +44,7 @@ from courtvision.tracking.evaluation import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="CourtVision AI - Milestone 3: ByteTrack Ground-Truth Tracking Evaluation"
+        description="CourtVision AI - Tracking Ground-Truth Evaluation (ByteTrack & KMT)"
     )
     parser.add_argument(
         "--ground-truth",
@@ -62,6 +63,49 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional path to pre-computed tracks.csv file (for single sequence evaluation)",
+    )
+    parser.add_argument(
+        "--tracker",
+        type=str,
+        choices=("bytetrack", "kmt"),
+        default="bytetrack",
+        help="Tracker implementation to evaluate (default: bytetrack)",
+    )
+    parser.add_argument(
+        "--export-ghosts",
+        action="store_true",
+        default=False,
+        help="Export KMT ghost predictions to evaluation outputs (default: False to prevent MOTA False Positive penalties)",
+    )
+    parser.add_argument(
+        "--cluster-iou",
+        type=float,
+        default=0.35,
+        help="KMT cluster IoU threshold (default: 0.35)",
+    )
+    parser.add_argument(
+        "--momentum-window",
+        type=int,
+        default=10,
+        help="KMT momentum history window frames (default: 10)",
+    )
+    parser.add_argument(
+        "--speed-gate",
+        type=float,
+        default=120.0,
+        help="KMT max implied speed in pixels/frame (default: 120.0)",
+    )
+    parser.add_argument(
+        "--camera-motion",
+        action="store_true",
+        default=False,
+        help="Enable camera motion compensation in KMT (default: False)",
+    )
+    parser.add_argument(
+        "--trail-length",
+        type=int,
+        default=15,
+        help="Trail history length in frames (default: 15)",
     )
     parser.add_argument(
         "--weights",
@@ -126,13 +170,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def create_tracker(
+    tracker_type: str = "bytetrack",
+    track_thresh: float = 0.25,
+    track_buffer: int = 30,
+    match_thresh: float = 0.8,
+    fps: float = 25.0,
+    trail_length: int = 15,
+    cluster_iou: float = 0.35,
+    momentum_window: int = 10,
+    speed_gate: float = 120.0,
+    enable_camera_motion: bool = False,
+    min_consecutive_frames: int = 2,
+) -> Any:
+    """Instantiate either ByteTrack or KMT tracker with specified parameters."""
+    if tracker_type == "kmt":
+        return KinematicMemoryTracker(
+            cluster_iou_threshold=cluster_iou,
+            momentum_window=momentum_window,
+            max_implied_speed_px_per_frame=speed_gate,
+            trail_length=trail_length,
+            enable_camera_motion=enable_camera_motion,
+        )
+    return FootballByteTracker(
+        track_activation_threshold=track_thresh,
+        lost_track_buffer=track_buffer,
+        minimum_matching_threshold=match_thresh,
+        frame_rate=int(fps),
+        minimum_consecutive_frames=min_consecutive_frames,
+        trail_length=trail_length,
+    )
+
+
 def run_tracking_on_video(
     video_path: Path,
     detector: PlayerDetector,
-    tracker: FootballByteTracker,
+    tracker: Any,
     fps: float = 25.0,
+    export_ghosts: bool = False,
 ) -> Tuple[List[TrackerBox], float, int]:
-    """Run YOLOv11m + ByteTrack on a video file and return 1-indexed TrackerBox list."""
+    """Run YOLOv11m + tracker on a video file and return 1-indexed TrackerBox list."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video file: {video_path}")
@@ -147,9 +224,16 @@ def run_tracking_on_video(
             break
 
         dets, _ = detector.detect(frame, frame_idx=frame_idx, fps=fps)
-        tracks, _ = tracker.update(dets, frame_idx=frame_idx, fps=fps)
+        if isinstance(tracker, KinematicMemoryTracker):
+            tracks, _ = tracker.update(dets, frame_idx=frame_idx, fps=fps, frame=frame)
+        else:
+            tracks, _ = tracker.update(dets, frame_idx=frame_idx, fps=fps)
 
         for t in tracks:
+            # Exclude ghost predictions from official MOT evaluation unless explicitly enabled
+            if not export_ghosts and getattr(t, "state", None) == "ghost":
+                continue
+
             # 1-indexed frame for MOT evaluation
             boxes.append(
                 TrackerBox(
@@ -174,13 +258,14 @@ def evaluate_with_trackeval(
     gt_by_seq: Dict[str, List[GroundTruthBox]],
     tracks_by_seq: Dict[str, List[TrackerBox]],
     seqmap_name: str,
+    tracker_name: str = "bytetrack",
     seq_length: int = 750,
 ) -> Dict[str, Any]:
     """Execute TrackEval using standard MOTChallenge format."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         gt_root = tmp / "gt" / "SNMOT-eval"
-        trk_root = tmp / "trackers" / "SNMOT-eval" / "bytetrack" / "data"
+        trk_root = tmp / "trackers" / "SNMOT-eval" / tracker_name / "data"
         trk_root.mkdir(parents=True)
 
         seqs = sorted(gt_by_seq.keys())
@@ -215,7 +300,7 @@ def evaluate_with_trackeval(
         dataset_config["BENCHMARK"] = "SNMOT"
         dataset_config["SPLIT_TO_EVAL"] = "eval"
         dataset_config["SEQMAP_FILE"] = str(seqmap_file)
-        dataset_config["TRACKERS_TO_EVAL"] = ["bytetrack"]
+        dataset_config["TRACKERS_TO_EVAL"] = [tracker_name]
         dataset_config["CLASSES_TO_EVAL"] = ["pedestrian"]
         dataset_config["DO_PREPROC"] = False
 
@@ -224,7 +309,7 @@ def evaluate_with_trackeval(
         metrics = [trackeval.metrics.HOTA(), trackeval.metrics.CLEAR(), trackeval.metrics.Identity()]
 
         res, _ = evaluator.evaluate([dataset], metrics)
-        return res["MotChallenge2DBox"]["bytetrack"]
+        return res["MotChallenge2DBox"][tracker_name]
 
 
 def extract_metric_subset(trackeval_res: Dict[str, Any], seq_key: str = "COMBINED_SEQ") -> Dict[str, float]:
@@ -412,7 +497,8 @@ def main() -> None:
         print(f"Loaded {len(parsed_tracks)} tracks for {seq0}")
     else:
         # Run live tracker on video sequences
-        print(f"\nInitializing YOLOv11m detector ({args.weights}) and ByteTrack tracker...")
+        tracker_display_name = "ByteTrack" if args.tracker == "bytetrack" else "Kinematic Memory Tracker (KMT)"
+        print(f"\nInitializing YOLOv11m detector ({args.weights}) and {tracker_display_name} tracker...")
         detector = PlayerDetector(
             model_path=args.weights,
             device=args.device,
@@ -425,15 +511,23 @@ def main() -> None:
             if not vid_path.exists():
                 raise FileNotFoundError(f"Video file not found at: {vid_path}")
 
-            tracker = FootballByteTracker(
-                track_activation_threshold=args.track_thresh,
-                lost_track_buffer=args.track_buffer,
-                minimum_matching_threshold=args.match_thresh,
-                frame_rate=int(args.fps),
+            tracker = create_tracker(
+                tracker_type=args.tracker,
+                track_thresh=args.track_thresh,
+                track_buffer=args.track_buffer,
+                match_thresh=args.match_thresh,
+                fps=args.fps,
+                trail_length=args.trail_length,
+                cluster_iou=args.cluster_iou,
+                momentum_window=args.momentum_window,
+                speed_gate=args.speed_gate,
+                enable_camera_motion=args.camera_motion,
             )
 
-            print(f"Running ByteTrack on {seq} ({vid_path})...")
-            trk_boxes, elapsed, n_frames = run_tracking_on_video(vid_path, detector, tracker, fps=args.fps)
+            print(f"Running {tracker_display_name} on {seq} ({vid_path})...")
+            trk_boxes, elapsed, n_frames = run_tracking_on_video(
+                vid_path, detector, tracker, fps=args.fps, export_ghosts=args.export_ghosts
+            )
             total_tracking_time += elapsed
             tracks_by_seq[seq] = trk_boxes
             print(
@@ -459,8 +553,10 @@ def main() -> None:
     # A) Overall (all frames)
     # B) Normal frames
     # C) Crowded/Occluded frames
-    print("\nRunning official TrackEval evaluation across subsets...")
-    overall_res = evaluate_with_trackeval(gt_by_seq, tracks_by_seq, seqmap_name="overall")
+    print(f"\nRunning official TrackEval evaluation across subsets ({args.tracker})...")
+    overall_res = evaluate_with_trackeval(
+        gt_by_seq, tracks_by_seq, seqmap_name="overall", tracker_name=args.tracker
+    )
     overall_metrics = extract_metric_subset(overall_res, "COMBINED_SEQ")
 
     # Build Normal and Crowded subsets
@@ -476,10 +572,14 @@ def main() -> None:
         gt_crowded[seq] = [g for g in gt_by_seq[seq] if g.frame in cr_set]
         tr_crowded[seq] = [t for t in tracks_by_seq[seq] if t.frame in cr_set]
 
-    normal_res = evaluate_with_trackeval(gt_normal, tr_normal, seqmap_name="normal")
+    normal_res = evaluate_with_trackeval(
+        gt_normal, tr_normal, seqmap_name="normal", tracker_name=args.tracker
+    )
     normal_metrics = extract_metric_subset(normal_res, "COMBINED_SEQ")
 
-    crowded_res = evaluate_with_trackeval(gt_crowded, tr_crowded, seqmap_name="crowded")
+    crowded_res = evaluate_with_trackeval(
+        gt_crowded, tr_crowded, seqmap_name="crowded", tracker_name=args.tracker
+    )
     crowded_metrics = extract_metric_subset(crowded_res, "COMBINED_SEQ")
 
     # Per-sequence breakdown for overall
@@ -663,7 +763,26 @@ def main() -> None:
 
     # 9. Reproducibility Evaluation Metadata
     metadata_json = output_dir / "evaluation_metadata.json"
-    metadata_content = {
+    tracker_name_str = "ByteTrack" if args.tracker == "bytetrack" else "KinematicMemoryTracker"
+    tracker_params: Dict[str, Any] = (
+        {
+            "cluster_iou_threshold": args.cluster_iou,
+            "momentum_window": args.momentum_window,
+            "max_implied_speed_px_per_frame": args.speed_gate,
+            "export_ghosts": args.export_ghosts,
+            "trail_length": args.trail_length,
+            "enable_camera_motion": args.camera_motion,
+        }
+        if args.tracker == "kmt"
+        else {
+            "track_activation_threshold": args.track_thresh,
+            "lost_track_buffer": args.track_buffer,
+            "minimum_matching_threshold": args.match_thresh,
+            "frame_rate": int(args.fps),
+            "trail_length": args.trail_length,
+        }
+    )
+    metadata_content: Dict[str, Any] = {
         "dataset": "SoccerNet-Tracking-2023",
         "dataset_version": "2023",
         "selected_sequence_ids": args.sequences,
@@ -673,28 +792,27 @@ def main() -> None:
         "total_frames_evaluated": len(args.sequences) * 750,
         "video_fps": args.fps,
         "video_resolution": [1920, 1080],
-        "tracker": "ByteTrack",
+        "tracker": tracker_name_str,
+        "tracker_type": args.tracker,
+        "export_ghosts": args.export_ghosts,
+        "tracker_parameters": tracker_params,
         "detector": detector_used,
         "detector_weights": args.weights,
-        "ByteTrack_parameters": {
-            "track_activation_threshold": args.track_thresh,
-            "lost_track_buffer": args.track_buffer,
-            "minimum_matching_threshold": args.match_thresh,
-            "frame_rate": int(args.fps),
-        },
         "evaluation_framework": "TrackEval",
         "evaluation_framework_version": "1.0.dev1",
         "device": detector.device if "detector" in locals() else "mps",
         "runtime_seconds": round(total_tracking_time, 2),
         "date_utc": datetime.now(timezone.utc).isoformat(),
     }
+    if args.tracker == "bytetrack":
+        metadata_content["ByteTrack_parameters"] = tracker_params
     with open(metadata_json, "w", encoding="utf-8") as f:
         json.dump(metadata_content, f, indent=2)
     print(f"Saved evaluation metadata to: {metadata_json}")
 
     # 10. Print Summary Comparison Table
     print("\n" + "=" * 70)
-    print("BYTE TRACK EVALUATION SUMMARY TABLE")
+    print(f"TRACKING EVALUATION SUMMARY TABLE ({args.tracker.upper()})")
     print("=" * 70)
     print(f"{'Metric':<10} | {'Overall':>12} | {'Normal':>12} | {'Crowded/Occluded':>18}")
     print("-" * 62)

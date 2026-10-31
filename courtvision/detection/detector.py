@@ -60,6 +60,84 @@ class Detection:
         return asdict(self)
 
 
+def suppress_contained_duplicates(
+    detections: List[Detection],
+    containment_threshold: float = 0.75,
+    iou_threshold: float = 0.20,
+    center_dx_threshold: float = 0.40,
+    area_ratio_threshold: float = 0.75,
+) -> List[Detection]:
+    """
+    Suppress nested sub-box duplicate detections that survive standard NMS.
+
+    Multi-criteria containment check evaluates pairs of detections:
+    - Relative containment: intersection area / smaller box area >= containment_threshold (0.75)
+    - Mutual IoU overlap: intersection / union >= iou_threshold (0.20)
+    - Horizontal center alignment: |cx_small - cx_large| / w_small <= center_dx_threshold (0.40)
+    - Relative box area: small_area / large_area <= area_ratio_threshold (0.75)
+
+    When all four conditions hold, the smaller nested box (e.g. lower-body/torso duplicate)
+    is suppressed in favor of the full-body player detection.
+    """
+    if len(detections) <= 1:
+        return detections
+
+    n = len(detections)
+    suppressed_indices = set()
+
+    for i in range(n):
+        if i in suppressed_indices:
+            continue
+        for j in range(i + 1, n):
+            if j in suppressed_indices:
+                continue
+
+            d1 = detections[i]
+            d2 = detections[j]
+
+            x1_inter = max(d1.x1, d2.x1)
+            y1_inter = max(d1.y1, d2.y1)
+            x2_inter = min(d1.x2, d2.x2)
+            y2_inter = min(d1.y2, d2.y2)
+            w_inter = max(0.0, x2_inter - x1_inter)
+            h_inter = max(0.0, y2_inter - y1_inter)
+            inter = w_inter * h_inter
+            if inter <= 0.0:
+                continue
+
+            a1 = d1.bbox_width * d1.bbox_height
+            a2 = d2.bbox_width * d2.bbox_height
+            union = a1 + a2 - inter
+            iou = inter / union if union > 0.0 else 0.0
+
+            if a1 <= a2:
+                small, large = d1, d2
+                small_idx = i
+                small_area, large_area = a1, a2
+            else:
+                small, large = d2, d1
+                small_idx = j
+                small_area, large_area = a2, a1
+
+            if small_area <= 0.0 or large_area <= 0.0:
+                continue
+
+            containment = inter / small_area
+            center_dx = abs(((small.x1 + small.x2) / 2.0) - ((large.x1 + large.x2) / 2.0)) / max(1.0, small.bbox_width)
+            area_ratio = small_area / large_area
+
+            # Multi-criteria duplicate check: never delete on containment alone
+            if (
+                containment >= containment_threshold
+                and iou >= iou_threshold
+                and center_dx <= center_dx_threshold
+                and area_ratio <= area_ratio_threshold
+            ):
+                suppressed_indices.add(small_idx)
+
+    return [d for idx, d in enumerate(detections) if idx not in suppressed_indices]
+
+
 class PlayerDetector:
     """YOLOv11m player detection wrapper with automatic device dispatch."""
 
@@ -70,6 +148,7 @@ class PlayerDetector:
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         imgsz: int = 640,
+        suppress_duplicates: bool = True,
     ) -> None:
         self.model_path = Path(model_path)
         if not self.model_path.exists():
@@ -92,6 +171,7 @@ class PlayerDetector:
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
+        self.suppress_duplicates = suppress_duplicates
 
         # Load weights
         self.model = YOLO(str(self.model_path))
@@ -147,5 +227,8 @@ class PlayerDetector:
                     y2=y2,
                 )
                 detections.append(det)
+
+        if self.suppress_duplicates and detections:
+            detections = suppress_contained_duplicates(detections)
 
         return detections, inference_ms

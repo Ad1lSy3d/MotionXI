@@ -1,3 +1,6 @@
+import math
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -120,6 +123,53 @@ def create_video_writer(
         fourcc_alt = cv2.VideoWriter_fourcc(*"avc1")
         writer = cv2.VideoWriter(str(path), fourcc_alt, fps, (width, height))
     return writer
+
+
+def finalize_video_for_web(video_path: Union[str, Path]) -> bool:
+    """Ensure an output MP4 video is encoded as web-compatible H.264 (yuv420p) with faststart
+
+    so that modern browsers (Google Chrome, Edge, Safari, Firefox) can render it
+    without displaying a black screen.
+    """
+    path = Path(video_path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+
+    ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+    if not Path(ffmpeg_bin).is_file():
+        return False
+
+    temp_path = path.with_name(f"{path.stem}_web_{path.suffix}")
+    try:
+        cmd = [
+            str(ffmpeg_bin),
+            "-y",
+            "-i",
+            str(path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(temp_path),
+        ]
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+        )
+        if res.returncode == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
+            temp_path.replace(path)
+            return True
+    except Exception:
+        pass
+    finally:
+        if temp_path.is_file():
+            temp_path.unlink(missing_ok=True)
+    return False
 
 
 def draw_detections(
@@ -280,9 +330,10 @@ def draw_tracks(
     track_ms: float = 0.0,
     total_unique_ids: int = 0,
     device_name: str = "mps",
+    tracker_name: str = "ByteTrack",
 ) -> np.ndarray:
     """
-    Render high-contrast ByteTrack visualizations including ID tags, foot trails, and HUD telemetry.
+    Render tracker visualizations including ID tags, foot trails, and HUD telemetry.
     """
     canvas = frame.copy()
     h, w = canvas.shape[:2]
@@ -301,7 +352,7 @@ def draw_tracks(
     time_str = f"{minutes:02d}:{seconds:05.2f}"
 
     hud_text = (
-        f"COURTVISION AI | BYTETRACK | Frame: {frame_idx:03d}/{total_frames:03d} | "
+        f"COURTVISION AI | {tracker_name.upper()} | Frame: {frame_idx:03d}/{total_frames:03d} | "
         f"Time: {time_str} | "
         f"Active: {len(tracks)} | Total IDs: {total_unique_ids} | "
         f"Infer: {infer_ms:.1f}ms | Track: {track_ms:.1f}ms | "
@@ -319,6 +370,7 @@ def draw_tracks(
     )
 
     # 2. Draw Trails for Active Tracks
+    h, w = canvas.shape[:2]
     for track in tracks:
         t_id = track.track_id
         color = get_track_color(t_id)
@@ -326,8 +378,20 @@ def draw_tracks(
         if len(trail) > 1:
             points = list(trail)
             for k in range(1, len(points)):
-                pt1 = (int(round(points[k - 1][0])), int(round(points[k - 1][1])))
-                pt2 = (int(round(points[k][0])), int(round(points[k][1])))
+                p1 = points[k - 1]
+                p2 = points[k]
+                # Avoid drawing lines connecting points outside the visible canvas
+                if not (-50.0 <= p1[0] <= w + 50.0 and -50.0 <= p1[1] <= h + 50.0):
+                    continue
+                if not (-50.0 <= p2[0] <= w + 50.0 and -50.0 <= p2[1] <= h + 50.0):
+                    continue
+                # Physical threshold: combined player sprint (~18px/f) + fast camera motion (~50px/f) <= 70px/f.
+                # Any step > 100px indicates a track discontinuity or identity swap; break the line.
+                step_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                if step_dist > 100.0:
+                    continue
+                pt1 = (int(round(p1[0])), int(round(p1[1])))
+                pt2 = (int(round(p2[0])), int(round(p2[1])))
                 thickness = max(1, int(1 + (k / len(points)) * 2))
                 cv2.line(canvas, pt1, pt2, color, thickness, cv2.LINE_AA)
 
@@ -335,6 +399,10 @@ def draw_tracks(
     for track in tracks:
         t_id = track.track_id
         color = get_track_color(t_id)
+        if track.state == "ghost":
+            color = (0, 190, 255)
+        elif track.state == "in_cluster":
+            color = (255, 180, 0)
 
         x1, y1 = int(round(track.x1)), int(round(track.y1))
         x2, y2 = int(round(track.x2)), int(round(track.y2))
@@ -344,7 +412,12 @@ def draw_tracks(
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
 
         # ID Badge
-        label = f"ID:{t_id} ({track.confidence:.2f})"
+        if track.state == "ghost":
+            label = f"ID:{t_id} GHOST"
+        elif track.state == "in_cluster":
+            label = f"ID:{t_id} CLUSTER"
+        else:
+            label = f"ID:{t_id} ({track.confidence:.2f})"
         (label_w, label_h), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
         )

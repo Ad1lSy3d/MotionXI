@@ -242,3 +242,57 @@ def test_metric_output_schema():
     ]
     for key in required_meta:
         assert key in metadata, f"Metadata key '{key}' missing from evaluation_metadata.json"
+
+
+def test_create_tracker_selection():
+    from scripts.evaluate_tracking import create_tracker
+    from courtvision.tracking.bytetrack_tracker import FootballByteTracker
+    from courtvision.tracking.kmt_tracker import KinematicMemoryTracker
+
+    bt = create_tracker(tracker_type="bytetrack")
+    assert isinstance(bt, FootballByteTracker)
+
+    kmt = create_tracker(tracker_type="kmt", cluster_iou=0.4, speed_gate=100.0)
+    assert isinstance(kmt, KinematicMemoryTracker)
+    assert kmt.cluster_iou_threshold == 0.4
+    assert kmt.max_implied_speed_px_per_frame == 100.0
+
+
+def test_ghost_filtering_for_mot_evaluation():
+    from courtvision.tracking.track_types import TrackedPlayer
+    from courtvision.tracking.evaluation import TrackerBox
+
+    tracks = [
+        TrackedPlayer.create(
+            frame=0, timestamp=0.0, track_id=1, class_id=0, class_name="player",
+            confidence=0.9, x1=10.0, y1=20.0, x2=30.0, y2=50.0, state="active"
+        ),
+        TrackedPlayer.create(
+            frame=0, timestamp=0.0, track_id=2, class_id=0, class_name="player",
+            confidence=0.8, x1=100.0, y1=200.0, x2=130.0, y2=250.0, state="ghost"
+        ),
+    ]
+
+    # When export_ghosts is False, ghost should be excluded
+    filtered_boxes = [
+        TrackerBox(
+            frame=1, track_id=t.track_id, x1=t.x1, y1=t.y1,
+            width=t.width, height=t.height, confidence=t.confidence,
+        )
+        for t in tracks
+        if getattr(t, "state", None) != "ghost"
+    ]
+    assert len(filtered_boxes) == 1
+    assert filtered_boxes[0].track_id == 1
+
+    # When export_ghosts is True, ghost should be included
+    all_boxes = [
+        TrackerBox(
+            frame=1, track_id=t.track_id, x1=t.x1, y1=t.y1,
+            width=t.width, height=t.height, confidence=t.confidence,
+        )
+        for t in tracks
+    ]
+    assert len(all_boxes) == 2
+    assert {b.track_id for b in all_boxes} == {1, 2}
+
